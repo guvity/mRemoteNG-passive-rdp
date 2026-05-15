@@ -1,0 +1,54 @@
+name: Build passive RDP monitor 1.77.2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Apply passive RDP monitor patch
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Tools\passive-rdp-monitor-1772.ps1
+
+      - name: Restore NuGet packages
+        shell: pwsh
+        run: |
+          nuget restore .\mRemoteNG.sln
+
+      - name: Build portable x86
+        shell: pwsh
+        run: |
+          msbuild .\mRemoteNG\mRemoteNG.csproj /m /p:Configuration="Release Portable" /p:Platform="x86" /p:RestorePackages=false
+
+      - name: Prepare artifact directory
+        shell: pwsh
+        run: |
+          $source = Join-Path $env:GITHUB_WORKSPACE "mRemoteNG\bin\Release Portable"
+          $out = Join-Path $env:GITHUB_WORKSPACE "_publish\mRemoteNG-passive-rdp-1772-win-x86"
+          if (!(Test-Path $source)) {
+            Write-Host "Build output not found at $source"
+            if (Test-Path .\mRemoteNG\bin) { Get-ChildItem -Recurse .\mRemoteNG\bin | Select-Object FullName }
+            exit 1
+          }
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item -Path (Join-Path $source "*") -Destination $out -Recurse -Force
+          Compress-Archive -Path (Join-Path $out "*") -DestinationPath "$out.zip" -Force
+
+      - name: Upload portable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: mRemoteNG-passive-rdp-1772-win-x86
+          path: _publish/mRemoteNG-passive-rdp-1772-win-x86.zip
+          if-no-files-found: error
