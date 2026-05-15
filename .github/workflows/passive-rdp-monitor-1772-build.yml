@@ -14,32 +14,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup .NET 6 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
 
-      - name: Setup NuGet
-        uses: NuGet/setup-nuget@v2
-
       - name: Apply passive RDP monitor patch
         shell: pwsh
-        run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Tools\passive-rdp-monitor-1772-v2.ps1
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Tools\passive-rdp-monitor-1772-v3.ps1
 
-      - name: Restore NuGet packages
+      - name: Restore packages
         shell: pwsh
-        run: |
-          nuget restore .\mRemoteNG.sln
+        run: dotnet restore .\mRemoteNG.sln
 
-      - name: Build portable x86
+      - name: Build portable x64
         shell: pwsh
-        run: |
-          msbuild .\mRemoteNG\mRemoteNG.csproj /m /p:Configuration="Release Portable" /p:Platform="x86" /p:RestorePackages=false
+        run: msbuild .\mRemoteNG.sln /m /p:Configuration="Release Portable" /p:Platform="x64" /verbosity:minimal
 
       - name: Prepare artifact directory
         shell: pwsh
         run: |
-          $source = Join-Path $env:GITHUB_WORKSPACE "mRemoteNG\bin\Release Portable"
-          $out = Join-Path $env:GITHUB_WORKSPACE "_publish\mRemoteNG-passive-rdp-1772-win-x86"
+          $source = Join-Path $env:GITHUB_WORKSPACE "mRemoteNG\bin\x64\Release Portable"
+          $out = Join-Path $env:GITHUB_WORKSPACE "_publish\mRemoteNG-passive-rdp-1772-win-x64"
           if (!(Test-Path $source)) {
             Write-Host "Build output not found at $source"
             if (Test-Path .\mRemoteNG\bin) { Get-ChildItem -Recurse .\mRemoteNG\bin | Select-Object FullName }
@@ -52,6 +51,6 @@ jobs:
       - name: Upload portable zip
         uses: actions/upload-artifact@v4
         with:
-          name: mRemoteNG-passive-rdp-1772-win-x86
-          path: _publish/mRemoteNG-passive-rdp-1772-win-x86.zip
+          name: mRemoteNG-passive-rdp-1772-win-x64
+          path: _publish/mRemoteNG-passive-rdp-1772-win-x64.zip
           if-no-files-found: error
