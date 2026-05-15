@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
 $rdp6 = Join-Path $root 'mRemoteNG\Connection\Protocol\RDP\RdpProtocol6.cs'
@@ -15,8 +15,22 @@ function Write-Text($path, $text) {
 
 function Replace-Once($text, $old, $new, $name) {
     if ($text.Contains($new)) { return $text }
-    if (!$text.Contains($old)) { throw "Could not find patch anchor: $name" }
-    return $text.Replace($old, $new)
+    if ($text.Contains($old)) { return $text.Replace($old, $new) }
+
+    $pattern = [regex]::Escape($old.Trim()) -replace '\\s+', '\s+'
+    if ([regex]::IsMatch($text, $pattern, [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
+        $rx = New-Object System.Text.RegularExpressions.Regex($pattern, [System.Text.RegularExpressions.RegexOptions]::Singleline)
+        return $rx.Replace($text, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $new }, 1)
+    }
+
+    if ($name -eq 'Fullscreen property') {
+        if ($text.Contains('Fullscreen = !Fullscreen;') -and !$text.Contains('ApplyFullscreenViewOnlyPolicy();')) {
+            return $text.Replace('Fullscreen = !Fullscreen;', "Fullscreen = !Fullscreen;`n                ApplyFullscreenViewOnlyPolicy();")
+        }
+        return $text
+    }
+
+    throw "Could not find patch anchor: $name"
 }
 
 $text = Read-Text $rdp6
@@ -419,3 +433,4 @@ _controlBeginningSize = Size.Empty;
 Write-Text $rdp8 $text
 
 Write-Host 'Passive RDP monitor patch for mRemoteNG 1.77.2 has been applied.'
+
