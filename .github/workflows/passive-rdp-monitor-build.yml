@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build-win-x64:
-    runs-on: windows-2022
+    runs-on: windows-2025-vs2026
 
     steps:
       - name: Checkout repository
@@ -19,28 +19,44 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Setup MSBuild
+      - name: Setup MSBuild 18
         uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: '[18.0,19.0)'
+          msbuild-architecture: x64
+
+      - name: Show build tools
+        shell: pwsh
+        run: |
+          where.exe msbuild
+          msbuild -version
+          dotnet --info
 
       - name: Transform AssemblyInfo T4
         shell: pwsh
         run: |
           dotnet tool install --global dotnet-t4
           $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
-          $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\PublicAssemblies"
-          t4 "$env:GITHUB_WORKSPACE\mRemoteNG\Properties\AssemblyInfo.tt" -P platformType=x64 -r:"$vsPath\EnvDTE.dll" -r:"$vsPath\Microsoft.VisualStudio.Interop.dll"
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -property installationPath
+          if (-not $vsPath) { throw "Visual Studio installation not found" }
+
+          $publicAssemblies = Join-Path $vsPath "Common7\IDE\PublicAssemblies"
+          t4 "$env:GITHUB_WORKSPACE\mRemoteNG\Properties\AssemblyInfo.tt" -P platformType=x64 -r:"$publicAssemblies\EnvDTE.dll" -r:"$publicAssemblies\Microsoft.VisualStudio.Interop.dll"
 
       - name: Restore portable x64 dependencies
         shell: pwsh
         run: |
-          msbuild .\mRemoteNG\mRemoteNG.csproj /t:Restore /p:Configuration="Release Self-Contained" /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:VisualStudioVersion=17.0 /verbosity:minimal
+          msbuild .\mRemoteNG\mRemoteNG.csproj /t:Restore /p:Configuration="Release Self-Contained" /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:VisualStudioVersion=18.0 /verbosity:minimal
 
       - name: Publish portable self-contained x64
         shell: pwsh
         run: |
           $out = "$env:GITHUB_WORKSPACE\_publish\mRemoteNG-passive-rdp-win-x64"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
-          msbuild .\mRemoteNG\mRemoteNG.csproj /t:Publish /p:Configuration="Release Self-Contained" /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:PublishSingleFile=false /p:PublishDir="$out\" /p:VisualStudioVersion=17.0 /verbosity:minimal
+
+          msbuild .\mRemoteNG\mRemoteNG.csproj /t:Publish /p:Configuration="Release Self-Contained" /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:PublishSingleFile=false /p:PublishDir="$out\" /p:VisualStudioVersion=18.0 /verbosity:minimal
 
       - name: Create zip
         shell: pwsh
