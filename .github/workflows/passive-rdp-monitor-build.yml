@@ -33,14 +33,14 @@ jobs:
       - name: Restore portable x64 dependencies
         shell: pwsh
         run: |
-          msbuild .\mRemoteNG\mRemoteNG.csproj /t:Restore /p:Configuration="Release Self-Contained" /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /verbosity:minimal
+          msbuild .\mRemoteNG\mRemoteNG.csproj /t:Restore /p:Configuration="Release Self-Contained" /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:VisualStudioVersion=17.0 /verbosity:minimal
 
       - name: Publish portable self-contained x64
         shell: pwsh
         run: |
           $out = "$env:GITHUB_WORKSPACE\_publish\mRemoteNG-passive-rdp-win-x64"
           New-Item -ItemType Directory -Force -Path $out | Out-Null
-          msbuild .\mRemoteNG\mRemoteNG.csproj /t:Publish /p:Configuration="Release Self-Contained" /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:PublishSingleFile=false /p:PublishDir="$out\" /verbosity:minimal
+          msbuild .\mRemoteNG\mRemoteNG.csproj /t:Publish /p:Configuration="Release Self-Contained" /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:PublishSingleFile=false /p:PublishDir="$out\" /p:VisualStudioVersion=17.0 /verbosity:minimal
 
       - name: Create zip
         shell: pwsh
