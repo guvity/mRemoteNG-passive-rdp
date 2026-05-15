@@ -580,8 +580,8 @@ namespace mRemoteNG.UI.Window
                 if (!(interfaceControl?.Protocol is ISupportsViewOnly viewOnly))
                     return;
 
-                cmenTabViewOnly.Checked = !cmenTabViewOnly.Checked;
                 viewOnly.ToggleViewOnly();
+                cmenTabViewOnly.Checked = viewOnly.ViewOnly;
             }
             catch (Exception ex)
             {

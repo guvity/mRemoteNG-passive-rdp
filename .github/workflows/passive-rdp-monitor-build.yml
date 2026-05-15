@@ -1,0 +1,58 @@
+name: Build passive RDP monitor
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-win-x64:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Restore NuGet packages
+        shell: pwsh
+        run: dotnet restore mRemoteNG.sln
+
+      - name: Transform AssemblyInfo T4
+        shell: pwsh
+        run: |
+          dotnet tool install --global dotnet-t4
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          $vsPath = "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\Common7\IDE\PublicAssemblies"
+          t4 "$env:GITHUB_WORKSPACE\mRemoteNG\Properties\AssemblyInfo.tt" -P platformType=x64 -r:"$vsPath\EnvDTE.dll" -r:"$vsPath\Microsoft.VisualStudio.Interop.dll"
+
+      - name: Publish portable self-contained x64
+        shell: pwsh
+        run: |
+          $out = "$env:GITHUB_WORKSPACE\_publish\mRemoteNG-passive-rdp-win-x64"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          msbuild mRemoteNG.sln /t:Publish /m /p:Configuration="Release Self-Contained" /p:Platform=x64 /p:RuntimeIdentifier=win-x64 /p:SelfContained=true /p:PublishSingleFile=false /p:PublishDir="$out\" /verbosity:minimal
+
+      - name: Create zip
+        shell: pwsh
+        run: |
+          $source = "$env:GITHUB_WORKSPACE\_publish\mRemoteNG-passive-rdp-win-x64"
+          $zip = "$env:GITHUB_WORKSPACE\mRemoteNG-passive-rdp-win-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$source\*" -DestinationPath $zip -Force
+          Get-Item $zip | Select-Object FullName, Length
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mRemoteNG-passive-rdp-win-x64
+          path: mRemoteNG-passive-rdp-win-x64.zip
+          if-no-files-found: error

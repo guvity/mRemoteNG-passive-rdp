@@ -12,6 +12,7 @@ using mRemoteNG.UI.Tabs;
 using MSTSCLib;
 using System;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
@@ -41,6 +42,13 @@ namespace mRemoteNG.Connection.Protocol.RDP
         protected bool loginComplete;
         private bool _redirectKeys;
         private bool _alertOnIdleDisconnect;
+        private bool _viewOnly;
+        private bool _suppressFocusOnAutomaticReconnect;
+        private bool _userDisabledViewOnlyInFullscreen;
+        private readonly System.Windows.Forms.Timer _bottomRightScrollTimer;
+        private readonly System.Windows.Forms.Timer _reconnectFocusSuppressionTimer;
+        private int _bottomRightScrollAttempts;
+        private RdpInputBlocker _inputBlocker;
         protected uint DesktopScaleFactor => (uint)(_displayProperties.ResolutionScalingFactor.Width * 100);
         protected readonly uint DeviceScaleFactor = 100;
         protected readonly uint Orientation = 0;
@@ -112,8 +120,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         public bool ViewOnly
         {
-            get => !AxHost.Enabled;
-            set => AxHost.Enabled = !value;
+            get => _viewOnly;
+            set => SetViewOnly(value, false);
         }
 
         #endregion
@@ -124,6 +132,12 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             _displayProperties = new DisplayProperties();
             tmrReconnect.Elapsed += tmrReconnect_Elapsed;
+
+            _bottomRightScrollTimer = new System.Windows.Forms.Timer { Interval = 250 };
+            _bottomRightScrollTimer.Tick += BottomRightScrollTimer_Tick;
+
+            _reconnectFocusSuppressionTimer = new System.Windows.Forms.Timer { Interval = 2500 };
+            _reconnectFocusSuppressionTimer.Tick += ReconnectFocusSuppressionTimer_Tick;
         }
 
         #endregion
@@ -180,6 +194,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 Control.Anchor = AnchorStyles.None;
 
                 _rdpClient = (MsRdpClient6NotSafeForScripting)((AxHost)Control).GetOcx();
+                _inputBlocker = new RdpInputBlocker(Control);
                 
                 return true;
             }
@@ -201,6 +216,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
         public override bool Connect()
         {
             loginComplete = false;
+            _suppressFocusOnAutomaticReconnect = false;
             SetEventHandlers();
 
             try
@@ -250,6 +266,13 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 {
                     Control.GotFocus -= RdpClient_GotFocus;
                 }
+
+                _bottomRightScrollTimer.Stop();
+                _bottomRightScrollTimer.Tick -= BottomRightScrollTimer_Tick;
+                _reconnectFocusSuppressionTimer.Stop();
+                _reconnectFocusSuppressionTimer.Tick -= ReconnectFocusSuppressionTimer_Tick;
+                _inputBlocker?.Dispose();
+                _inputBlocker = null;
             }
             catch (Exception ex)
             {
@@ -263,7 +286,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             try
             {
-                Fullscreen = !Fullscreen;
+                bool enteringFullscreen = !Fullscreen;
+                Fullscreen = enteringFullscreen;
+                ApplyFullscreenViewOnlyState(enteringFullscreen);
+                ScheduleScrollToDesktopBottomRight();
             }
             catch (Exception ex)
             {
@@ -291,7 +317,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             try
             {
-                ViewOnly = !ViewOnly;
+                SetViewOnly(!ViewOnly, true);
             }
             catch
             {
@@ -303,6 +329,11 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             try
             {
+                if (_suppressFocusOnAutomaticReconnect || ViewOnly)
+                {
+                    return;
+                }
+
                 if (Control.ContainsFocus == false)
                 {
                     Control.Focus();
@@ -366,7 +397,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             #endregion
 
             //not user changeable
-            _rdpClient.AdvancedSettings2.GrabFocusOnConnect = true;
+            _rdpClient.AdvancedSettings2.GrabFocusOnConnect = false;
             _rdpClient.AdvancedSettings3.EnableAutoReconnect = true;
             _rdpClient.AdvancedSettings3.MaxReconnectAttempts = Settings.Default.RdpReconnectionCount;
             _rdpClient.AdvancedSettings2.keepAliveInterval = 60000; //in milliseconds (10,000 = 10 seconds)
@@ -389,7 +420,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             SetAuthenticationLevel();
             SetLoadBalanceInfo();
             SetRdGateway();
-            ViewOnly = Force.HasFlag(ConnectionInfo.Force.ViewOnly);
+            ApplyFullscreenViewOnlyState(IsRdpFullscreen());
 
             _rdpClient.ColorDepth = (int)connectionInfo.Colors;
 
@@ -422,6 +453,242 @@ namespace mRemoteNG.Connection.Protocol.RDP
             catch (Exception ex)
             {
                 Runtime.MessageCollector.AddExceptionMessage($"Error setting extended RDP property '{property}'", ex, MessageClass.WarningMsg, false);
+            }
+        }
+
+        private bool IsRdpFullscreen()
+        {
+            try
+            {
+                return Fullscreen;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void ApplyFullscreenViewOnlyState(bool isFullscreen)
+        {
+            if (isFullscreen)
+            {
+                if (!_userDisabledViewOnlyInFullscreen)
+                {
+                    SetViewOnly(true, false);
+                }
+
+                return;
+            }
+
+            _userDisabledViewOnlyInFullscreen = false;
+            SetViewOnly(false, false);
+        }
+
+        private void SetViewOnly(bool value, bool userInitiated)
+        {
+            bool isFullscreen = IsRdpFullscreen();
+
+            if (!isFullscreen)
+            {
+                value = false;
+            }
+
+            _viewOnly = value;
+
+            if (_inputBlocker != null)
+            {
+                _inputBlocker.Enabled = value;
+            }
+
+            if (userInitiated && isFullscreen)
+            {
+                _userDisabledViewOnlyInFullscreen = !value;
+            }
+
+            if (value && Control != null && Control.ContainsFocus && InterfaceControl != null && !InterfaceControl.IsDisposed)
+            {
+                InterfaceControl.Focus();
+            }
+        }
+
+        protected void ScheduleScrollToDesktopBottomRight()
+        {
+            if (InterfaceControl == null || InterfaceControl.IsDisposed)
+            {
+                return;
+            }
+
+            void StartScrollTimer()
+            {
+                if (InterfaceControl == null || InterfaceControl.IsDisposed)
+                {
+                    return;
+                }
+
+                _bottomRightScrollAttempts = 8;
+                _bottomRightScrollTimer.Stop();
+                ScrollToDesktopBottomRight();
+                _bottomRightScrollTimer.Start();
+            }
+
+            try
+            {
+                if (InterfaceControl.InvokeRequired)
+                {
+                    InterfaceControl.BeginInvoke(new Action(StartScrollTimer));
+                }
+                else
+                {
+                    StartScrollTimer();
+                }
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+
+        private void BottomRightScrollTimer_Tick(object sender, EventArgs e)
+        {
+            if (_bottomRightScrollAttempts-- <= 0)
+            {
+                _bottomRightScrollTimer.Stop();
+                return;
+            }
+
+            ScrollToDesktopBottomRight();
+        }
+
+        private void ScrollToDesktopBottomRight()
+        {
+            if (InterfaceControl == null || InterfaceControl.IsDisposed || !InterfaceControl.AutoScroll)
+            {
+                return;
+            }
+
+            try
+            {
+                InterfaceControl.PerformLayout();
+
+                int x = Math.Max(0, InterfaceControl.HorizontalScroll.Maximum - InterfaceControl.HorizontalScroll.LargeChange + 1);
+                int y = Math.Max(0, InterfaceControl.VerticalScroll.Maximum - InterfaceControl.VerticalScroll.LargeChange + 1);
+
+                InterfaceControl.AutoScrollPosition = new Point(x, y);
+            }
+            catch (InvalidOperationException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+
+        private void ScheduleClearAutomaticReconnectFocusSuppression()
+        {
+            if (Control == null || Control.IsDisposed)
+            {
+                _suppressFocusOnAutomaticReconnect = false;
+                return;
+            }
+
+            void StartTimer()
+            {
+                _reconnectFocusSuppressionTimer.Stop();
+                _reconnectFocusSuppressionTimer.Start();
+            }
+
+            try
+            {
+                if (Control.InvokeRequired)
+                {
+                    Control.BeginInvoke(new Action(StartTimer));
+                }
+                else
+                {
+                    StartTimer();
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                _suppressFocusOnAutomaticReconnect = false;
+            }
+            catch (ObjectDisposedException)
+            {
+                _suppressFocusOnAutomaticReconnect = false;
+            }
+        }
+
+        private void ReconnectFocusSuppressionTimer_Tick(object sender, EventArgs e)
+        {
+            _reconnectFocusSuppressionTimer.Stop();
+            _suppressFocusOnAutomaticReconnect = false;
+        }
+
+        private sealed class RdpInputBlocker : NativeWindow, IDisposable
+        {
+            private readonly Control _control;
+            public bool Enabled { get; set; }
+
+            public RdpInputBlocker(Control control)
+            {
+                _control = control;
+                _control.HandleCreated += Control_HandleCreated;
+                _control.HandleDestroyed += Control_HandleDestroyed;
+
+                if (_control.IsHandleCreated)
+                {
+                    AssignHandle(_control.Handle);
+                }
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                if (Enabled && IsBlockedInputMessage(m.Msg))
+                {
+                    if (m.Msg == 0x0021) // WM_MOUSEACTIVATE
+                    {
+                        m.Result = new IntPtr(4); // MA_NOACTIVATEANDEAT
+                    }
+                    else
+                    {
+                        m.Result = IntPtr.Zero;
+                    }
+
+                    return;
+                }
+
+                base.WndProc(ref m);
+            }
+
+            private static bool IsBlockedInputMessage(int msg)
+            {
+                return msg switch
+                {
+                    0x0021 => true, // WM_MOUSEACTIVATE
+                    0x00FF => true, // WM_INPUT
+                    >= 0x0100 and <= 0x0108 => true, // keyboard
+                    >= 0x0200 and <= 0x020E => true, // mouse
+                    _ => false
+                };
+            }
+
+            private void Control_HandleCreated(object sender, EventArgs e)
+            {
+                AssignHandle(_control.Handle);
+            }
+
+            private void Control_HandleDestroyed(object sender, EventArgs e)
+            {
+                ReleaseHandle();
+            }
+
+            public void Dispose()
+            {
+                _control.HandleCreated -= Control_HandleCreated;
+                _control.HandleDestroyed -= Control_HandleDestroyed;
+                ReleaseHandle();
             }
         }
 
@@ -978,21 +1245,33 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private void RDPEvent_OnConnected()
         {
             Event_Connected(this);
+            ApplyFullscreenViewOnlyState(IsRdpFullscreen());
+            ScheduleScrollToDesktopBottomRight();
         }
 
         private void RDPEvent_OnLoginComplete()
         {
             loginComplete = true;
+            ApplyFullscreenViewOnlyState(IsRdpFullscreen());
+            ScheduleScrollToDesktopBottomRight();
+            ScheduleClearAutomaticReconnectFocusSuppression();
         }
 
         private void RDPEvent_OnLeaveFullscreenMode()
         {
             Fullscreen = false;
+            ApplyFullscreenViewOnlyState(false);
+            ScheduleScrollToDesktopBottomRight();
             _leaveFullscreenEvent?.Invoke(this, EventArgs.Empty);
         }
 
         private void RdpClient_GotFocus(object sender, EventArgs e)
         {
+            if (_suppressFocusOnAutomaticReconnect || ViewOnly)
+            {
+                return;
+            }
+
             ((ConnectionTab)Control.Parent.Parent).Focus();
         }
         #endregion
@@ -1036,11 +1315,15 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 if (!ReconnectGroup.ReconnectWhenReady || !srvReady) return;
                 tmrReconnect.Enabled = false;
                 ReconnectGroup.DisposeReconnectGroup();
+                loginComplete = false;
+                _suppressFocusOnAutomaticReconnect = true;
+                ApplyFullscreenViewOnlyState(IsRdpFullscreen());
                 //SetProps()
                 _rdpClient.Connect();
             }
             catch (Exception ex)
             {
+                _suppressFocusOnAutomaticReconnect = false;
                 Runtime.MessageCollector.AddExceptionMessage(
                     string.Format(Language.AutomaticReconnectError, connectionInfo.Hostname),
                     ex, MessageClass.WarningMsg, false);

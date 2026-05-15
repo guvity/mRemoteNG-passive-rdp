@@ -207,11 +207,16 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
             if (InterfaceControl.InvokeRequired)
             {
-                InterfaceControl.BeginInvoke(new Action(ScheduleDebouncedResize));
+                InterfaceControl.BeginInvoke(new Action(() =>
+                {
+                    ScheduleDebouncedResize();
+                    ScheduleScrollToDesktopBottomRight();
+                }));
             }
             else
             {
                 ScheduleDebouncedResize();
+                ScheduleScrollToDesktopBottomRight();
             }
         }
 
@@ -261,6 +266,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     $"Calling UpdateSessionDisplaySettings({size.Width}, {size.Height}) for '{connectionInfo.Hostname}' (Control.Size={Control.Size}, InterfaceControl.Size={InterfaceControl.Size})");
 
                 UpdateSessionDisplaySettings((uint)size.Width, (uint)size.Height);
+                ScheduleScrollToDesktopBottomRight();
 
                 Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                     $"Successfully resized RDP session for '{connectionInfo.Hostname}' to {size.Width}x{size.Height}");
@@ -321,6 +327,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
             Runtime.MessageCollector?.AddMessage(MessageClass.DebugMsg,
                 $"DoResizeControl - After: Control.Size={Control.Size}, Control.Dock={Control.Dock}");
+            ScheduleScrollToDesktopBottomRight();
 
             return true;
         }
