@@ -23,7 +23,7 @@ jobs:
       - name: Apply passive RDP monitor patch
         shell: pwsh
         run: |
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Tools\passive-rdp-monitor-1772.ps1
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Tools\passive-rdp-monitor-1772-v2.ps1
 
       - name: Restore NuGet packages
         shell: pwsh
