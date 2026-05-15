@@ -1,0 +1,72 @@
+name: Build passive RDP monitor 1.77.2 clean
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - passive-rdp-monitor-1772-clean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 6 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '6.0.x'
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: Apply passive RDP monitor patch
+        shell: pwsh
+        run: powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Tools\passive-rdp-monitor-1772-clean.ps1
+
+      - name: Restore packages
+        shell: pwsh
+        run: nuget restore .\mRemoteNG.sln
+
+      - name: Build portable x64
+        shell: pwsh
+        run: msbuild .\mRemoteNG\mRemoteNG.csproj /m /p:Configuration="Release Portable" /p:Platform="x64" /p:RestorePackages=false /verbosity:minimal
+
+      - name: Prepare portable artifact
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:GITHUB_WORKSPACE\mRemoteNG\bin\x64\Release Portable",
+            "$env:GITHUB_WORKSPACE\mRemoteNG\bin\Release Portable",
+            "$env:GITHUB_WORKSPACE\mRemoteNG\bin\Release"
+          )
+          $source = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $source) {
+            Write-Host "Could not find build output. mRemoteNG\bin tree:"
+            if (Test-Path "$env:GITHUB_WORKSPACE\mRemoteNG\bin") {
+              Get-ChildItem -Recurse "$env:GITHUB_WORKSPACE\mRemoteNG\bin" | Select-Object FullName
+            }
+            exit 1
+          }
+          Write-Host "Using build output: $source"
+          $out = "$env:GITHUB_WORKSPACE\_publish\mRemoteNG-passive-rdp-1772-win-x64"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item -Path (Join-Path $source '*') -Destination $out -Recurse -Force
+          $zip = "$env:GITHUB_WORKSPACE\mRemoteNG-passive-rdp-1772-win-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path (Join-Path $out '*') -DestinationPath $zip -Force
+
+      - name: Upload portable zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: mRemoteNG-passive-rdp-1772-win-x64
+          path: mRemoteNG-passive-rdp-1772-win-x64.zip
+          if-no-files-found: error
