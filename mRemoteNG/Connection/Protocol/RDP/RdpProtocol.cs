@@ -643,7 +643,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 }
             }
 
-            protected override void WndProc(ref Message m)
+            protected override void WndProc(ref System.Windows.Forms.Message m)
             {
                 if (Enabled && IsBlockedInputMessage(m.Msg))
                 {
