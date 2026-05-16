@@ -949,7 +949,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 }
             }
 
-            public bool PreFilterMessage(ref Message m)
+            public bool PreFilterMessage(ref System.Windows.Forms.Message m)
             {
                 if (!IsInputMessage(m.Msg))
                     return false;
