@@ -65,6 +65,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 ReconnectForResize();
             }
             _controlBeginningSize = Size.Empty;
+            ScrollToLowerRightAsync();
         }
 
         protected override AxHost CreateActiveXRdpClientControl()
@@ -96,6 +97,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     ? Screen.FromControl(Control).Bounds.Size
                     : Control.Size;
                 RdpClient8.Reconnect((uint)size.Width, (uint)size.Height);
+                ScrollToLowerRightAsync();
             }
             catch (Exception ex)
             {
