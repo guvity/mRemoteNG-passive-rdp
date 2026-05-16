@@ -505,8 +505,8 @@ namespace mRemoteNG.UI.Window
                 if (!(interfaceControl?.Protocol is ISupportsViewOnly viewOnly))
                     return;
 
-                cmenTabViewOnly.Checked = !cmenTabViewOnly.Checked;
                 viewOnly.ToggleViewOnly();
+                cmenTabViewOnly.Checked = viewOnly.ViewOnly;
             }
             catch (Exception ex)
             {
@@ -563,6 +563,11 @@ namespace mRemoteNG.UI.Window
                 var interfaceControl = GetInterfaceControl();
                 var rdp = interfaceControl?.Protocol as RdpProtocol6;
                 rdp?.ToggleFullscreen();
+                if (rdp != null)
+                {
+                    cmenTabFullscreen.Checked = rdp.Fullscreen;
+                    cmenTabViewOnly.Checked = rdp.ViewOnly;
+                }
             }
             catch (Exception ex)
             {
