@@ -1,5 +1,6 @@
-﻿using System;
+using System;
 using System.Diagnostics;
+using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Timers;
@@ -36,6 +37,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private readonly DisplayProperties _displayProperties;
         private readonly FrmMain _frmMain = FrmMain.Default;
         protected virtual RdpVersion RdpProtocolVersion => RdpVersion.Rdc6;
+        private bool _viewOnly;
+        private bool _userDisabledViewOnlyInFullscreen;
+        private bool _automaticReconnectInProgress;
+
         private AxHost AxHost => (AxHost)Control;
 
         #region Properties
@@ -85,8 +90,20 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         public bool ViewOnly
         {
-            get => !AxHost.Enabled;
-            set => AxHost.Enabled = !value;
+            get => _viewOnly;
+            set
+            {
+                bool was = _viewOnly;
+                _viewOnly = value;
+
+                if (Fullscreen)
+                {
+                    if (was && !value)
+                        _userDisabledViewOnlyInFullscreen = true;
+                    else if (!was && value)
+                        _userDisabledViewOnlyInFullscreen = false;
+                }
+            }
         }
 
         #endregion
@@ -239,6 +256,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         public override void Focus()
         {
+            if (_automaticReconnectInProgress)
+            {
+                return;
+            }
             try
             {
                 if (Control.ContainsFocus == false)
@@ -293,7 +314,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             #endregion
 
             //not user changeable
-            _rdpClient.AdvancedSettings2.GrabFocusOnConnect = true;
+            _rdpClient.AdvancedSettings2.GrabFocusOnConnect = false;
             _rdpClient.AdvancedSettings3.EnableAutoReconnect = true;
             _rdpClient.AdvancedSettings3.MaxReconnectAttempts = Settings.Default.RdpReconnectionCount;
             _rdpClient.AdvancedSettings2.keepAliveInterval = 60000; //in milliseconds (10,000 = 10 seconds)
@@ -315,7 +336,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
             SetAuthenticationLevel();
             SetLoadBalanceInfo();
             SetRdGateway();
-            ViewOnly = Force.HasFlag(ConnectionInfo.Force.ViewOnly);
+            if (Force.HasFlag(ConnectionInfo.Force.ViewOnly))
+                ViewOnly = true;
 
             _rdpClient.ColorDepth = (int)connectionInfo.Colors;
 
@@ -690,6 +712,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 _rdpClient.OnFatalError += RDPEvent_OnFatalError;
                 _rdpClient.OnDisconnected += RDPEvent_OnDisconnected;
                 _rdpClient.OnLeaveFullScreenMode += RDPEvent_OnLeaveFullscreenMode;
+                _rdpClient.OnEnterFullScreenMode += RDPEvent_OnEnterFullscreenMode;
                 _rdpClient.OnIdleTimeoutNotification += RDPEvent_OnIdleTimeoutNotification;
             }
             catch (Exception ex)
@@ -751,22 +774,41 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void RDPEvent_OnConnected()
         {
+            if (_automaticReconnectInProgress)
+            {
+                _automaticReconnectInProgress = false;
+                if (Fullscreen && !_userDisabledViewOnlyInFullscreen)
+                    ViewOnly = true;
+            }
             Event_Connected(this);
+            ScrollToBottomRight();
         }
 
         private void RDPEvent_OnLoginComplete()
         {
             loginComplete = true;
+            ScrollToBottomRight();
         }
 
         private void RDPEvent_OnLeaveFullscreenMode()
         {
             Fullscreen = false;
+            ViewOnly = false;
+            _userDisabledViewOnlyInFullscreen = false;
             _leaveFullscreenEvent?.Invoke(this, new EventArgs());
+            ScrollToBottomRight();
+        }
+
+        private void RDPEvent_OnEnterFullscreenMode()
+        {
+            if (!_userDisabledViewOnlyInFullscreen)
+                ViewOnly = true;
+            ScrollToBottomRight();
         }
 
         private void RdpClient_GotFocus(object sender, EventArgs e)
         {
+            if (_automaticReconnectInProgress) return;
             ((ConnectionTab)Control.Parent.Parent).Focus();
         }
         #endregion
@@ -821,8 +863,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 if (!ReconnectGroup.ReconnectWhenReady || !srvReady) return;
                 tmrReconnect.Enabled = false;
                 ReconnectGroup.DisposeReconnectGroup();
+                _automaticReconnectInProgress = true;
                 //SetProps()
                 _rdpClient.Connect();
+                ScrollToBottomRight();
             }
             catch (Exception ex)
             {
@@ -830,6 +874,33 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     string.Format(Language.AutomaticReconnectError, connectionInfo.Hostname),
                     ex, MessageClass.WarningMsg, false);
             }
+        }
+
+        private void ScrollToBottomRight()
+        {
+            if (Control == null || Control.IsDisposed || Control.Parent == null)
+                return;
+
+            Control.BeginInvoke((MethodInvoker)delegate
+            {
+                try
+                {
+                    ScrollableControl sc = Control.Parent as ScrollableControl;
+                    if (sc == null && Control.Parent.Parent != null)
+                        sc = Control.Parent.Parent as ScrollableControl;
+
+                    if (sc != null && sc.AutoScroll)
+                    {
+                        int maxX = Math.Max(0, sc.HorizontalScroll.Maximum - sc.HorizontalScroll.LargeChange + 1);
+                        int maxY = Math.Max(0, sc.VerticalScroll.Maximum - sc.VerticalScroll.LargeChange + 1);
+                        sc.AutoScrollPosition = new Point(maxX, maxY);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Runtime.MessageCollector.AddExceptionMessage("ScrollToBottomRight failed", ex, MessageClass.DebugMsg, false);
+                }
+            });
         }
 
         #endregion
