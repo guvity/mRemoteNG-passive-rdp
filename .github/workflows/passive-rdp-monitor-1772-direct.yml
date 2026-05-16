@@ -20,18 +20,25 @@ jobs:
     - name: Setup MSBuild
       uses: microsoft/setup-msbuild@v2
 
-    - name: Restore
-      run: dotnet restore mRemoteNG.sln
+    - name: Restore main project only
+      run: dotnet restore mRemoteNG/mRemoteNG.csproj
 
-    - name: Build Release Portable x64
-      run: msbuild mRemoteNG.sln /p:Configuration="Release Portable" /p:Platform=x64 /t:Build /m
-
-    - name: Zip portable build
+    - name: Build Release Portable x64 (main project only)
       run: |
-        Compress-Archive -Path "mRemoteNG\bin\x64\Release Portable\*" -DestinationPath "mRemoteNG-passive-rdp-1772-win-x64.zip" -Force
+        msbuild mRemoteNG/mRemoteNG.csproj `
+          /p:Configuration="Release Portable" `
+          /p:Platform=x64 `
+          /t:Build `
+          /m
+
+    - name: Create portable ZIP
+      run: |
+        $out = "mRemoteNG\bin\x64\Release Portable"
+        Compress-Archive -Path "$out\*" -DestinationPath "mRemoteNG-passive-rdp-1772-win-x64.zip" -Force
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
         name: mRemoteNG-passive-rdp-1772-win-x64
         path: mRemoteNG-passive-rdp-1772-win-x64.zip
+        retention-days: 30
