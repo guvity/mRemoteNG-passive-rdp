@@ -349,6 +349,9 @@ namespace mRemoteNG.UI.Window
             var ic = GetInterfaceControl();
             if (ic?.Info == null) return;
             FrmMain.Default.SelectedConnection = ic.Info;
+
+            if (ic.Protocol is RdpProtocol6 rdp)
+                rdp.NotifyPassiveTabActivated();
         }
 
         #endregion

@@ -61,6 +61,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private System.Windows.Forms.Timer _fullscreenExitFinalizeTimer;
         private int _fullscreenExitFinalizeAttempts;
         private Control _rdpSafeFocusSink;
+        private System.Windows.Forms.Timer _passiveTabActivationScrollTimer;
+        private int _passiveTabActivationScrollAttempts;
+        private string _passiveTabActivationScrollSource;
 
         private const int FullscreenPollMaxAttempts = 10;
         private const int FullscreenPollIntervalMs = 200;
@@ -69,6 +72,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private const int ScrollRetryMaxAttempts = 10;
         private const int ScrollRetryIntervalMs = 200;
         private const int FullscreenLeaveScrollDelayMs = 800;
+        private const int PassiveTabActivationScrollIntervalMs = 200;
+        private const int PassiveTabActivationScrollMaxAttempts = 5;
         private const int SafeScrollViewportMultiplier = 5;
         private const int SafeScrollAbsoluteMaximum = 8192;
         private static readonly TimeSpan FullscreenLeaveCooldown = TimeSpan.FromSeconds(2);
@@ -328,6 +333,48 @@ namespace mRemoteNG.Connection.Protocol.RDP
             catch (Exception ex)
             {
                 Runtime.MessageCollector.AddExceptionStackTrace(Language.RdpFocusFailed, ex);
+            }
+        }
+
+        public void NotifyPassiveTabActivated()
+        {
+            try
+            {
+                if (Control == null || Control.IsDisposed || !Control.IsHandleCreated)
+                    return;
+
+                var scrollable = FindRdpScrollContainer();
+                var effectiveFullscreen = IsFullscreenEffective();
+                var rdpClientFullscreen = IsRdpClientFullscreenActiveSafe();
+                var fullscreen = effectiveFullscreen || rdpClientFullscreen;
+                var keepScrollable = ShouldKeepRdpControlScrollable();
+
+                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                    $"RDP passive tab activated for host '{connectionInfo?.Hostname}': " +
+                    $"ViewOnly={ViewOnly}, Fullscreen={fullscreen}, EffectiveFullscreen={effectiveFullscreen}, " +
+                    $"RdpClientFullscreen={rdpClientFullscreen}, ShouldKeepRdpControlScrollable={keepScrollable}, " +
+                    $"AutoScrollPosition={FormatPoint(scrollable?.AutoScrollPosition ?? Point.Empty)}, " +
+                    $"Control.Size={FormatSize(Control.Size)}, InterfaceControl.ClientSize={FormatSize(InterfaceControl?.ClientSize ?? Size.Empty)}");
+
+                if (fullscreen)
+                    return;
+
+                if (!ViewOnly)
+                    return;
+
+                if (!keepScrollable)
+                    return;
+
+                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                    $"RDP passive tab activated for host '{connectionInfo?.Hostname}'; scheduling lower-right scroll restore");
+
+                SchedulePassiveTabActivationScrollRestore("connDock.ActiveContentChanged");
+            }
+            catch (Exception ex)
+            {
+                Runtime.MessageCollector.AddExceptionMessage(
+                    $"RDP passive tab activation handling failed for host '{connectionInfo?.Hostname}'",
+                    ex, MessageClass.WarningMsg, false);
             }
         }
 
@@ -990,6 +1037,94 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             _fullscreenLeaveScrollTimer?.Stop();
             ScrollToLowerRightAsync($"after fullscreen leave: {_fullscreenLeaveScrollSource}");
+        }
+
+        private void SchedulePassiveTabActivationScrollRestore(string source)
+        {
+            if (Control == null || Control.IsDisposed || !Control.IsHandleCreated)
+                return;
+
+            _passiveTabActivationScrollSource = source;
+            _passiveTabActivationScrollAttempts = 0;
+
+            if (_passiveTabActivationScrollTimer == null)
+            {
+                _passiveTabActivationScrollTimer = new System.Windows.Forms.Timer
+                {
+                    Interval = PassiveTabActivationScrollIntervalMs
+                };
+                _passiveTabActivationScrollTimer.Tick += PassiveTabActivationScrollTimerOnTick;
+            }
+
+            _passiveTabActivationScrollTimer.Stop();
+
+            try
+            {
+                Control.BeginInvoke(new Action(() =>
+                {
+                    ScrollToLowerRightAsync(source + " immediate");
+                }));
+            }
+            catch
+            {
+                ScrollToLowerRightAsync(source + " immediate");
+            }
+
+            _passiveTabActivationScrollTimer.Start();
+
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP passive tab activation scroll restore scheduled from {source} for host '{connectionInfo?.Hostname}'");
+        }
+
+        private void PassiveTabActivationScrollTimerOnTick(object sender, EventArgs e)
+        {
+            _passiveTabActivationScrollAttempts++;
+
+            if (Control == null || Control.IsDisposed || !Control.IsHandleCreated)
+            {
+                StopPassiveTabActivationScrollTimer();
+                return;
+            }
+
+            var scrollable = FindRdpScrollContainer();
+            var effectiveFullscreen = IsFullscreenEffective();
+            var rdpClientFullscreen = IsRdpClientFullscreenActiveSafe();
+            var fullscreen = effectiveFullscreen || rdpClientFullscreen;
+
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP passive tab activation scroll restore attempt {_passiveTabActivationScrollAttempts} " +
+                $"from {_passiveTabActivationScrollSource} for host '{connectionInfo?.Hostname}': " +
+                $"AutoScrollPositionBefore={FormatPoint(scrollable?.AutoScrollPosition ?? Point.Empty)}, " +
+                $"ViewOnly={ViewOnly}, Fullscreen={fullscreen}, EffectiveFullscreen={effectiveFullscreen}, " +
+                $"RdpClientFullscreen={rdpClientFullscreen}, ShouldKeepRdpControlScrollable={ShouldKeepRdpControlScrollable()}");
+
+            if (fullscreen)
+            {
+                StopPassiveTabActivationScrollTimer();
+                return;
+            }
+
+            if (!ViewOnly)
+            {
+                StopPassiveTabActivationScrollTimer();
+                return;
+            }
+
+            ScrollToLowerRightAsync(
+                $"{_passiveTabActivationScrollSource} delayed attempt {_passiveTabActivationScrollAttempts}");
+
+            if (_passiveTabActivationScrollAttempts >= PassiveTabActivationScrollMaxAttempts)
+                StopPassiveTabActivationScrollTimer();
+        }
+
+        private void StopPassiveTabActivationScrollTimer()
+        {
+            if (_passiveTabActivationScrollTimer == null)
+                return;
+
+            _passiveTabActivationScrollTimer.Stop();
+            _passiveTabActivationScrollAttempts = 0;
+            _passiveTabActivationScrollSource = null;
         }
 
         private void StopScrollRetryTimer()
@@ -2113,6 +2248,14 @@ namespace mRemoteNG.Connection.Protocol.RDP
             _fullscreenExitFinalizeTimer?.Stop();
             _fullscreenExitFinalizeTimer?.Dispose();
             _fullscreenExitFinalizeTimer = null;
+            if (_passiveTabActivationScrollTimer != null)
+            {
+                _passiveTabActivationScrollTimer.Stop();
+                _passiveTabActivationScrollTimer.Tick -= PassiveTabActivationScrollTimerOnTick;
+                _passiveTabActivationScrollTimer.Dispose();
+                _passiveTabActivationScrollTimer = null;
+            }
+
             _rdpSafeFocusSink?.Dispose();
             _rdpSafeFocusSink = null;
             _viewOnly = false;
