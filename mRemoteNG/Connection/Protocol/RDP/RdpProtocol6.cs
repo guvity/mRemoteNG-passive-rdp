@@ -1471,15 +1471,15 @@ namespace mRemoteNG.Connection.Protocol.RDP
             ScrollToLowerRightAsync();
         }
 
-        private void RDPEvent_OnAutoReconnecting(int disconnectReason, int attemptCount,
-            out AutoReconnectContinueState pArcContinueStatus)
+        private AutoReconnectContinueState RDPEvent_OnAutoReconnecting(int disconnectReason, int attemptCount)
         {
-            pArcContinueStatus = AutoReconnectContinueState.autoReconnectContinueAutomatic;
             BeginAutomaticReconnect();
             ApplyFullscreenViewOnlyPolicy("OnAutoReconnecting");
             Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                 $"RDP ActiveX autoreconnecting for host '{connectionInfo?.Hostname}': " +
                 $"disconnectReason={disconnectReason}, attemptCount={attemptCount}");
+
+            return AutoReconnectContinueState.autoReconnectContinueAutomatic;
         }
 
         private void RDPEvent_OnAutoReconnected()
