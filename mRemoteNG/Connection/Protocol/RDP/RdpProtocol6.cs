@@ -61,13 +61,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private System.Windows.Forms.Timer _fullscreenExitFinalizeTimer;
         private int _fullscreenExitFinalizeAttempts;
         private Control _rdpSafeFocusSink;
-        private bool _hasPassiveScrollTarget;
-        private Point _lastPassiveScrollTarget;
-        private Size _lastPassiveScrollSurfaceSize;
-        private Size _lastPassiveScrollViewportSize;
-        private System.Windows.Forms.Timer _passiveScrollRestoreTimer;
-        private int _passiveScrollRestoreAttempts;
-        private ConnectionTab _attachedConnectionTab;
 
         private const int FullscreenPollMaxAttempts = 10;
         private const int FullscreenPollIntervalMs = 200;
@@ -75,8 +68,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private const int FullscreenExitFinalizeMaxAttempts = 15;
         private const int ScrollRetryMaxAttempts = 10;
         private const int ScrollRetryIntervalMs = 200;
-        private const int PassiveScrollRestoreIntervalMs = 120;
-        private const int PassiveScrollRestoreMaxAttempts = 6;
         private const int FullscreenLeaveScrollDelayMs = 800;
         private const int SafeScrollViewportMultiplier = 5;
         private const int SafeScrollAbsoluteMaximum = 8192;
@@ -223,7 +214,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 _rdpClient = (MsRdpClient6NotSafeForScripting)((AxHost)Control).GetOcx();
                 NormalizeRdpScrollOrigin(FindRdpScrollContainer(), "InitializeActiveXControl");
                 ScrollToLowerRightAsync("InitializeActiveXControl");
-                AttachPassiveScrollRestoreHooks("InitializeActiveXControl");
                 return true;
             }
             catch (COMException ex)
@@ -1089,7 +1079,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     scrollable.PerformLayout();
                     Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                         BuildScrollDiagnostics(attempt, source, scrollable, surfaceSize, targetX, targetY, true));
-                    RememberPassiveScrollTarget(scrollable, surfaceSize, viewport, targetX, targetY, source);
                     EnableViewOnlyAfterSuccessfulPassiveLayout(source, false);
                     return true;
                 }
@@ -1102,10 +1091,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     BuildScrollDiagnostics(attempt, source, scrollable, surfaceSize, targetX, targetY, success));
 
                 if (success)
-                {
-                    RememberPassiveScrollTarget(scrollable, surfaceSize, viewport, targetX, targetY, source);
                     EnableViewOnlyAfterSuccessfulPassiveLayout(source, true);
-                }
 
                 return success;
             }
@@ -1115,150 +1101,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     $"RDP scroll lower-right attempt {attempt} from {source} failed for host '{connectionInfo?.Hostname}'",
                     ex, MessageClass.WarningMsg, false);
                 return true;
-            }
-        }
-
-        private void RememberPassiveScrollTarget(ScrollableControl scrollable, Size surfaceSize, Size viewport,
-            int targetX, int targetY, string source)
-        {
-            _hasPassiveScrollTarget = true;
-            _lastPassiveScrollTarget = new Point(targetX, targetY);
-            _lastPassiveScrollSurfaceSize = surfaceSize;
-            _lastPassiveScrollViewportSize = viewport;
-
-            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                $"RDP passive scroll target remembered from {source} for host '{connectionInfo?.Hostname}': " +
-                $"target={targetX},{targetY}, surface={FormatSize(surfaceSize)}, viewport={FormatSize(viewport)}, " +
-                $"current={scrollable.AutoScrollPosition}");
-
-            AttachPassiveScrollRestoreHooks("RememberPassiveScrollTarget");
-        }
-
-        private void SchedulePassiveScrollRestore(string source)
-        {
-            if (!_hasPassiveScrollTarget)
-                return;
-
-            if (Control == null || Control.IsDisposed || !Control.IsHandleCreated)
-                return;
-
-            if (IsFullscreenEffective() || IsRdpClientFullscreenActiveSafe())
-                return;
-
-            _passiveScrollRestoreAttempts = 0;
-
-            if (_passiveScrollRestoreTimer == null)
-            {
-                _passiveScrollRestoreTimer = new System.Windows.Forms.Timer { Interval = PassiveScrollRestoreIntervalMs };
-                _passiveScrollRestoreTimer.Tick += PassiveScrollRestoreTimerOnTick;
-            }
-
-            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                $"RDP passive scroll restore scheduled from {source} for host '{connectionInfo?.Hostname}': " +
-                $"target={_lastPassiveScrollTarget.X},{_lastPassiveScrollTarget.Y}");
-
-            _passiveScrollRestoreTimer.Stop();
-
-            try
-            {
-                Control.BeginInvoke(new Action(() => RestorePassiveScrollPosition(source + " immediate")));
-            }
-            catch
-            {
-                RestorePassiveScrollPosition(source + " immediate");
-            }
-
-            _passiveScrollRestoreTimer.Start();
-        }
-
-        private void PassiveScrollRestoreTimerOnTick(object sender, EventArgs e)
-        {
-            _passiveScrollRestoreAttempts++;
-            var done = RestorePassiveScrollPosition($"restore attempt {_passiveScrollRestoreAttempts}");
-
-            if (done || _passiveScrollRestoreAttempts >= PassiveScrollRestoreMaxAttempts)
-            {
-                _passiveScrollRestoreTimer.Stop();
-                _passiveScrollRestoreAttempts = 0;
-            }
-        }
-
-        private bool RestorePassiveScrollPosition(string source)
-        {
-            try
-            {
-                if (!_hasPassiveScrollTarget)
-                    return true;
-
-                if (Control == null || Control.IsDisposed || !Control.IsHandleCreated || InterfaceControl == null)
-                    return true;
-
-                if (IsFullscreenEffective() || IsRdpClientFullscreenActiveSafe())
-                    return true;
-
-                var scrollable = FindRdpScrollContainer();
-                if (scrollable == null || scrollable.IsDisposed || scrollable.ClientSize.IsEmpty)
-                    return false;
-
-                scrollable.AutoScroll = true;
-
-                Control.Location = Point.Empty;
-                Control.Margin = Padding.Empty;
-                Control.Anchor = AnchorStyles.Top | AnchorStyles.Left;
-
-                if (IsPositiveSize(_lastPassiveScrollSurfaceSize) && Control.Size != _lastPassiveScrollSurfaceSize)
-                    Control.Size = _lastPassiveScrollSurfaceSize;
-
-                scrollable.AutoScrollMinSize = Control.Size;
-                scrollable.PerformLayout();
-
-                var viewport = GetRdpViewportSize(scrollable);
-                var maxTargetX = Math.Max(0, Control.Width - viewport.Width);
-                var maxTargetY = Math.Max(0, Control.Height - viewport.Height);
-                var targetX = Math.Min(Math.Max(0, _lastPassiveScrollTarget.X), maxTargetX);
-                var targetY = Math.Min(Math.Max(0, _lastPassiveScrollTarget.Y), maxTargetY);
-
-                SetScrollBarValueSafely(scrollable.HorizontalScroll, targetX);
-                SetScrollBarValueSafely(scrollable.VerticalScroll, targetY);
-
-                scrollable.AutoScrollPosition = new Point(targetX, targetY);
-                scrollable.PerformLayout();
-
-                var current = scrollable.AutoScrollPosition;
-                var ok = Math.Abs(Math.Abs(current.X) - targetX) <= 5 &&
-                         Math.Abs(Math.Abs(current.Y) - targetY) <= 5;
-
-                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                    $"RDP passive scroll restored from {source} for host '{connectionInfo?.Hostname}': " +
-                    $"target={targetX},{targetY}, current={current}, ok={ok}, " +
-                    $"Control.Size={FormatSize(Control.Size)}, viewport={FormatSize(viewport)}, " +
-                    $"rememberedViewport={FormatSize(_lastPassiveScrollViewportSize)}, " +
-                    $"AutoScrollMinSize={FormatSize(scrollable.AutoScrollMinSize)}");
-
-                return ok;
-            }
-            catch (Exception ex)
-            {
-                Runtime.MessageCollector.AddExceptionMessage(
-                    $"RDP passive scroll restore failed from {source} for host '{connectionInfo?.Hostname}'",
-                    ex, MessageClass.WarningMsg, false);
-                return true;
-            }
-        }
-
-        private static void SetScrollBarValueSafely(ScrollProperties scroll, int requestedValue)
-        {
-            if (scroll == null || !scroll.Visible)
-                return;
-
-            try
-            {
-                var maxValue = Math.Max(scroll.Minimum, scroll.Maximum - scroll.LargeChange + 1);
-                var value = Math.Min(Math.Max(scroll.Minimum, requestedValue), maxValue);
-                scroll.Value = value;
-            }
-            catch
-            {
             }
         }
 
@@ -1277,85 +1119,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
             }
 
             return null;
-        }
-
-        private void AttachPassiveScrollRestoreHooks(string source)
-        {
-            var tab = FindConnectionTab();
-            if (tab != null && !ReferenceEquals(tab, _attachedConnectionTab))
-            {
-                if (_attachedConnectionTab != null)
-                {
-                    _attachedConnectionTab.Activated -= ConnectionTab_ActivatedForPassiveScrollRestore;
-                    _attachedConnectionTab.GotFocus -= ConnectionTab_GotFocusForPassiveScrollRestore;
-                    _attachedConnectionTab.VisibleChanged -= ConnectionTab_VisibleChangedForPassiveScrollRestore;
-                }
-
-                _attachedConnectionTab = tab;
-                _attachedConnectionTab.Activated += ConnectionTab_ActivatedForPassiveScrollRestore;
-                _attachedConnectionTab.GotFocus += ConnectionTab_GotFocusForPassiveScrollRestore;
-                _attachedConnectionTab.VisibleChanged += ConnectionTab_VisibleChangedForPassiveScrollRestore;
-
-                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                    $"RDP passive scroll restore hooks attached from {source} for host '{connectionInfo?.Hostname}'");
-            }
-
-            if (InterfaceControl != null)
-            {
-                InterfaceControl.VisibleChanged -= InterfaceControl_VisibleChangedForPassiveScrollRestore;
-                InterfaceControl.VisibleChanged += InterfaceControl_VisibleChangedForPassiveScrollRestore;
-            }
-
-            if (Control != null)
-            {
-                Control.VisibleChanged -= RdpControl_VisibleChangedForPassiveScrollRestore;
-                Control.VisibleChanged += RdpControl_VisibleChangedForPassiveScrollRestore;
-            }
-        }
-
-        private ConnectionTab FindConnectionTab()
-        {
-            if (InterfaceControl?.Parent is ConnectionTab interfaceTab)
-                return interfaceTab;
-
-            var parent = Control?.Parent;
-            while (parent != null)
-            {
-                if (parent is ConnectionTab tab)
-                    return tab;
-
-                parent = parent.Parent;
-            }
-
-            return Control?.Parent?.Parent as ConnectionTab;
-        }
-
-        private void ConnectionTab_ActivatedForPassiveScrollRestore(object sender, EventArgs e)
-        {
-            SchedulePassiveScrollRestore("ConnectionTab.Activated");
-        }
-
-        private void ConnectionTab_GotFocusForPassiveScrollRestore(object sender, EventArgs e)
-        {
-            SchedulePassiveScrollRestore("ConnectionTab.GotFocus");
-        }
-
-        private void ConnectionTab_VisibleChangedForPassiveScrollRestore(object sender, EventArgs e)
-        {
-            if (_attachedConnectionTab?.Visible == true)
-                SchedulePassiveScrollRestore("ConnectionTab.VisibleChanged");
-        }
-
-        private void InterfaceControl_VisibleChangedForPassiveScrollRestore(object sender, EventArgs e)
-        {
-            if (InterfaceControl?.Visible == true)
-                SchedulePassiveScrollRestore("InterfaceControl.VisibleChanged");
-        }
-
-        private void RdpControl_VisibleChangedForPassiveScrollRestore(object sender, EventArgs e)
-        {
-            if (Control?.Visible == true)
-                SchedulePassiveScrollRestore("RdpControl.VisibleChanged");
         }
 
         protected void ApplyRdpControlSizeForCurrentResolution()
@@ -2234,7 +1997,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
             AllowAutoViewOnlyAfterPassiveScroll("OnConnected");
             ApplyFullscreenViewOnlyPolicy("OnConnected");
             ScrollToLowerRightAsync("OnConnected");
-            AttachPassiveScrollRestoreHooks("OnConnected");
         }
 
         private void RDPEvent_OnLoginComplete()
@@ -2244,7 +2006,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
             AllowAutoViewOnlyAfterPassiveScroll("OnLoginComplete");
             ApplyFullscreenViewOnlyPolicy("OnLoginComplete");
             ScrollToLowerRightAsync("OnLoginComplete");
-            AttachPassiveScrollRestoreHooks("OnLoginComplete");
             EndAutomaticReconnect();
         }
 
@@ -2336,7 +2097,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
             NormalizeRdpScrollOrigin(FindRdpScrollContainer(), "Control.ParentChanged");
             ApplyRdpControlSizeForCurrentResolution("Control.ParentChanged");
             ScrollToLowerRightAsync("Control.ParentChanged");
-            AttachPassiveScrollRestoreHooks("Control.ParentChanged");
         }
 
         private void RdpClient_Disposed(object sender, EventArgs e)
@@ -2353,28 +2113,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
             _fullscreenExitFinalizeTimer?.Stop();
             _fullscreenExitFinalizeTimer?.Dispose();
             _fullscreenExitFinalizeTimer = null;
-            if (_passiveScrollRestoreTimer != null)
-            {
-                _passiveScrollRestoreTimer.Stop();
-                _passiveScrollRestoreTimer.Tick -= PassiveScrollRestoreTimerOnTick;
-                _passiveScrollRestoreTimer.Dispose();
-                _passiveScrollRestoreTimer = null;
-            }
-
-            if (_attachedConnectionTab != null)
-            {
-                _attachedConnectionTab.Activated -= ConnectionTab_ActivatedForPassiveScrollRestore;
-                _attachedConnectionTab.GotFocus -= ConnectionTab_GotFocusForPassiveScrollRestore;
-                _attachedConnectionTab.VisibleChanged -= ConnectionTab_VisibleChangedForPassiveScrollRestore;
-                _attachedConnectionTab = null;
-            }
-
-            if (InterfaceControl != null)
-                InterfaceControl.VisibleChanged -= InterfaceControl_VisibleChangedForPassiveScrollRestore;
-
-            if (Control != null)
-                Control.VisibleChanged -= RdpControl_VisibleChangedForPassiveScrollRestore;
-
             _rdpSafeFocusSink?.Dispose();
             _rdpSafeFocusSink = null;
             _viewOnly = false;
