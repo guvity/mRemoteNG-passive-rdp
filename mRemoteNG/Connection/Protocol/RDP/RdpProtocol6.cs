@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Diagnostics;
+using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Timers;
@@ -39,8 +40,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private AxHost AxHost => (AxHost)Control;
         private static readonly PassiveRdpInputBlocker InputBlocker = new PassiveRdpInputBlocker();
         private bool _viewOnly;
+        private bool _hasCompletedInitialConnect;
         private bool _userDisabledViewOnlyInFullscreen;
         private bool _automaticReconnectInProgress;
+        private bool _suppressFocusOnAutomaticReconnect;
 
         #region Properties
 
@@ -175,7 +178,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
         public override bool Connect()
         {
             loginComplete = false;
+            _hasCompletedInitialConnect = false;
             _automaticReconnectInProgress = false;
+            _suppressFocusOnAutomaticReconnect = false;
             SetEventHandlers();
 
             try
@@ -259,7 +264,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             try
             {
-                if (ViewOnly || _automaticReconnectInProgress)
+                if (ShouldSuppressRdpFocus())
                     return;
 
                 if (Control.ContainsFocus == false)
@@ -293,6 +298,11 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 return false;
             }
         }
+
+        public override void ResizeEnd(object sender, EventArgs e)
+        {
+            ScrollToLowerRightAsync();
+        }
         #endregion
 
         #region Private Methods
@@ -300,6 +310,12 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void SetViewOnly(bool value)
         {
+            if (Control != null && Control.IsHandleCreated && Control.InvokeRequired)
+            {
+                Control.BeginInvoke(new Action(() => SetViewOnly(value)));
+                return;
+            }
+
             if (!Fullscreen)
                 value = false;
 
@@ -307,10 +323,16 @@ namespace mRemoteNG.Connection.Protocol.RDP
             InputBlocker.SetBlocked(Control, _viewOnly);
         }
 
-        private void ApplyFullscreenViewOnlyPolicy()
+        protected void ApplyFullscreenViewOnlyPolicy()
         {
             if (Control == null || _rdpClient == null)
                 return;
+
+            if (Control.IsHandleCreated && Control.InvokeRequired)
+            {
+                Control.BeginInvoke(new Action(ApplyFullscreenViewOnlyPolicy));
+                return;
+            }
 
             if (Fullscreen)
             {
@@ -333,47 +355,171 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 if (Control == null || Control.IsDisposed || !Control.IsHandleCreated)
                     return;
 
-                Control.BeginInvoke(new Action(() =>
-                {
-                    ScrollToLowerRight();
-
-                    var timer = new System.Windows.Forms.Timer { Interval = 300 };
-                    timer.Tick += (sender, args) =>
-                    {
-                        timer.Stop();
-                        timer.Dispose();
-                        ScrollToLowerRight();
-                    };
-                    timer.Start();
-                }));
+                Control.BeginInvoke(new Action(StartScrollToLowerRightRetries));
             }
             catch
             {
             }
         }
 
-        private void ScrollToLowerRight()
+        protected void BeginAutomaticReconnect()
         {
+            if (!_hasCompletedInitialConnect)
+                return;
+
+            _automaticReconnectInProgress = true;
+            _suppressFocusOnAutomaticReconnect = true;
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"Suppressing RDP focus during automatic reconnect for host '{connectionInfo.Hostname}'");
+        }
+
+        protected void EndAutomaticReconnect()
+        {
+            if (!_automaticReconnectInProgress && !_suppressFocusOnAutomaticReconnect)
+                return;
+
             try
             {
-                var parent = Control?.Parent;
-                while (parent != null)
+                if (Control == null || Control.IsDisposed || !Control.IsHandleCreated)
                 {
-                    var scrollable = parent as ScrollableControl;
-                    if (scrollable != null)
-                    {
-                        scrollable.AutoScrollPosition = new System.Drawing.Point(
-                            scrollable.HorizontalScroll.Maximum,
-                            scrollable.VerticalScroll.Maximum);
-                        return;
-                    }
-
-                    parent = parent.Parent;
+                    ClearAutomaticReconnectState();
+                    return;
                 }
+
+                Control.BeginInvoke(new Action(() =>
+                {
+                    var timer = new System.Windows.Forms.Timer { Interval = 350 };
+                    timer.Tick += (sender, args) =>
+                    {
+                        timer.Stop();
+                        timer.Dispose();
+                        ClearAutomaticReconnectState();
+                    };
+                    timer.Start();
+                }));
             }
             catch
             {
+                ClearAutomaticReconnectState();
             }
+        }
+
+        private void ClearAutomaticReconnectState()
+        {
+            _automaticReconnectInProgress = false;
+            _suppressFocusOnAutomaticReconnect = false;
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"Released RDP automatic reconnect focus suppression for host '{connectionInfo.Hostname}'");
+        }
+
+        private bool ShouldSuppressRdpFocus()
+        {
+            return ViewOnly || _automaticReconnectInProgress || _suppressFocusOnAutomaticReconnect;
+        }
+
+        private void StartScrollToLowerRightRetries()
+        {
+            var attempt = 0;
+            var timer = new System.Windows.Forms.Timer { Interval = 200 };
+            EventHandler tick = null;
+            tick = (sender, args) =>
+            {
+                attempt++;
+                ScrollToLowerRight(attempt);
+
+                if (attempt < 8)
+                    return;
+
+                timer.Stop();
+                timer.Tick -= tick;
+                timer.Dispose();
+            };
+
+            timer.Tick += tick;
+            tick(timer, EventArgs.Empty);
+            timer.Start();
+        }
+
+        private void ScrollToLowerRight(int attempt)
+        {
+            try
+            {
+                ApplyRdpControlSizeForCurrentResolution();
+
+                var scrollable = FindRdpScrollContainer();
+                if (scrollable == null)
+                {
+                    Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                        $"RDP scroll attempt {attempt} for host '{connectionInfo.Hostname}': no scrollable container found");
+                    return;
+                }
+
+                scrollable.AutoScroll = true;
+                scrollable.PerformLayout();
+
+                var horizontalScroll = scrollable.HorizontalScroll;
+                var verticalScroll = scrollable.VerticalScroll;
+                var targetX = Math.Max(0, horizontalScroll.Maximum - horizontalScroll.LargeChange + 1);
+                var targetY = Math.Max(0, verticalScroll.Maximum - verticalScroll.LargeChange + 1);
+
+                scrollable.AutoScrollPosition = new Point(targetX, targetY);
+
+                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                    "RDP scroll lower-right attempt " + attempt +
+                    $" for host '{connectionInfo.Hostname}': container={scrollable.Name}/{scrollable.GetType().FullName}, " +
+                    $"AutoScroll={scrollable.AutoScroll}, HVisible={horizontalScroll.Visible}, VVisible={verticalScroll.Visible}, " +
+                    $"HMax={horizontalScroll.Maximum}, HLarge={horizontalScroll.LargeChange}, HValue={horizontalScroll.Value}, " +
+                    $"VMax={verticalScroll.Maximum}, VLarge={verticalScroll.LargeChange}, VValue={verticalScroll.Value}, " +
+                    $"targetX={targetX}, targetY={targetY}, final={scrollable.AutoScrollPosition}");
+            }
+            catch (Exception ex)
+            {
+                Runtime.MessageCollector.AddExceptionMessage(
+                    $"RDP scroll lower-right attempt {attempt} failed for host '{connectionInfo.Hostname}'",
+                    ex, MessageClass.WarningMsg, false);
+            }
+        }
+
+        private ScrollableControl FindRdpScrollContainer()
+        {
+            if (InterfaceControl != null)
+                return InterfaceControl;
+
+            var parent = Control?.Parent;
+            while (parent != null)
+            {
+                if (parent is ScrollableControl scrollable)
+                    return scrollable;
+
+                parent = parent.Parent;
+            }
+
+            return null;
+        }
+
+        private void ApplyRdpControlSizeForCurrentResolution()
+        {
+            if (Control == null || _rdpClient == null || !ShouldUseFixedResolutionControlSize())
+                return;
+
+            var width = _rdpClient.DesktopWidth;
+            var height = _rdpClient.DesktopHeight;
+            if (width <= 0 || height <= 0)
+                return;
+
+            var targetSize = new Size(width, height);
+            if (Control.Size != targetSize)
+                Control.Size = targetSize;
+        }
+
+        protected bool ShouldUseFixedResolutionControlSize()
+        {
+            if (InterfaceControl?.Info == null || Force.HasFlag(ConnectionInfo.Force.Fullscreen))
+                return false;
+
+            return InterfaceControl.Info.Resolution != RDPResolutions.FitToWindow &&
+                   InterfaceControl.Info.Resolution != RDPResolutions.SmartSize &&
+                   InterfaceControl.Info.Resolution != RDPResolutions.Fullscreen;
         }
 
         private void SetRdpClientProperties()
@@ -673,6 +819,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     _rdpClient.DesktopWidth = resolution.Width;
                     _rdpClient.DesktopHeight = resolution.Height;
                 }
+
+                ApplyRdpControlSizeForCurrentResolution();
             }
             catch (Exception ex)
             {
@@ -814,12 +962,16 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void RDPEvent_OnFatalError(int errorCode)
         {
+            EndAutomaticReconnect();
             var errorMsg = RdpErrorCodes.GetError(errorCode);
             Event_ErrorOccured(this, errorMsg, errorCode);
         }
 
         private void RDPEvent_OnDisconnected(int discReason)
         {
+            if (_automaticReconnectInProgress && !Settings.Default.ReconnectOnDisconnect)
+                EndAutomaticReconnect();
+
             const int UI_ERR_NORMAL_DISCONNECT = 0xB08;
             if (discReason != UI_ERR_NORMAL_DISCONNECT)
             {
@@ -859,9 +1011,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private void RDPEvent_OnLoginComplete()
         {
             loginComplete = true;
-            _automaticReconnectInProgress = false;
+            _hasCompletedInitialConnect = true;
             ApplyFullscreenViewOnlyPolicy();
             ScrollToLowerRightAsync();
+            EndAutomaticReconnect();
         }
 
         private void RDPEvent_OnLeaveFullscreenMode()
@@ -873,7 +1026,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void RdpClient_GotFocus(object sender, EventArgs e)
         {
-            if (ViewOnly || _automaticReconnectInProgress)
+            if (ShouldSuppressRdpFocus())
                 return;
 
             ((ConnectionTab)Control.Parent.Parent).Focus();
@@ -894,116 +1047,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
         }
 
         #endregion
-
-
-        private sealed class PassiveRdpInputBlocker : IMessageFilter
-        {
-            private readonly System.Collections.Generic.List<Control> _blockedControls =
-                new System.Collections.Generic.List<Control>();
-
-            private const int WM_MOUSEACTIVATE = 0x0021;
-            private const int WM_INPUT = 0x00FF;
-            private const int WM_KEYDOWN = 0x0100;
-            private const int WM_KEYUP = 0x0101;
-            private const int WM_CHAR = 0x0102;
-            private const int WM_SYSKEYDOWN = 0x0104;
-            private const int WM_SYSKEYUP = 0x0105;
-            private const int WM_MOUSEMOVE = 0x0200;
-            private const int WM_LBUTTONDOWN = 0x0201;
-            private const int WM_LBUTTONUP = 0x0202;
-            private const int WM_LBUTTONDBLCLK = 0x0203;
-            private const int WM_RBUTTONDOWN = 0x0204;
-            private const int WM_RBUTTONUP = 0x0205;
-            private const int WM_RBUTTONDBLCLK = 0x0206;
-            private const int WM_MBUTTONDOWN = 0x0207;
-            private const int WM_MBUTTONUP = 0x0208;
-            private const int WM_MBUTTONDBLCLK = 0x0209;
-            private const int WM_MOUSEWHEEL = 0x020A;
-            private const int WM_XBUTTONDOWN = 0x020B;
-            private const int WM_XBUTTONUP = 0x020C;
-            private const int WM_XBUTTONDBLCLK = 0x020D;
-            private const int WM_MOUSEHWHEEL = 0x020E;
-
-            [DllImport("user32.dll")]
-            private static extern bool IsChild(IntPtr hWndParent, IntPtr hWnd);
-
-            public void SetBlocked(Control control, bool blocked)
-            {
-                if (control == null)
-                    return;
-
-                if (blocked)
-                {
-                    if (!_blockedControls.Contains(control))
-                    {
-                        _blockedControls.Add(control);
-                        if (_blockedControls.Count == 1)
-                            Application.AddMessageFilter(this);
-                    }
-                }
-                else
-                {
-                    _blockedControls.Remove(control);
-                    if (_blockedControls.Count == 0)
-                        Application.RemoveMessageFilter(this);
-                }
-            }
-
-            public bool PreFilterMessage(ref System.Windows.Forms.Message m)
-            {
-                if (!IsInputMessage(m.Msg))
-                    return false;
-
-                var controls = _blockedControls.ToArray();
-                foreach (var control in controls)
-                {
-                    if (IsMessageForControl(control, m.HWnd))
-                        return true;
-                }
-
-                return false;
-            }
-
-            private static bool IsInputMessage(int msg)
-            {
-                switch (msg)
-                {
-                    case WM_MOUSEACTIVATE:
-                    case WM_INPUT:
-                    case WM_KEYDOWN:
-                    case WM_KEYUP:
-                    case WM_CHAR:
-                    case WM_SYSKEYDOWN:
-                    case WM_SYSKEYUP:
-                    case WM_MOUSEMOVE:
-                    case WM_LBUTTONDOWN:
-                    case WM_LBUTTONUP:
-                    case WM_LBUTTONDBLCLK:
-                    case WM_RBUTTONDOWN:
-                    case WM_RBUTTONUP:
-                    case WM_RBUTTONDBLCLK:
-                    case WM_MBUTTONDOWN:
-                    case WM_MBUTTONUP:
-                    case WM_MBUTTONDBLCLK:
-                    case WM_MOUSEWHEEL:
-                    case WM_XBUTTONDOWN:
-                    case WM_XBUTTONUP:
-                    case WM_XBUTTONDBLCLK:
-                    case WM_MOUSEHWHEEL:
-                        return true;
-                    default:
-                        return false;
-                }
-            }
-
-            private static bool IsMessageForControl(Control control, IntPtr hWnd)
-            {
-                if (control == null || control.IsDisposed || !control.IsHandleCreated)
-                    return false;
-
-                return control.Handle == hWnd || IsChild(control.Handle, hWnd);
-            }
-        }
 
         #region Enums
 
@@ -1041,13 +1084,13 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 tmrReconnect.Enabled = false;
                 ReconnectGroup.DisposeReconnectGroup();
                 //SetProps()
-                _automaticReconnectInProgress = true;
+                BeginAutomaticReconnect();
                 ApplyFullscreenViewOnlyPolicy();
                 _rdpClient.Connect();
             }
             catch (Exception ex)
             {
-                _automaticReconnectInProgress = false;
+                EndAutomaticReconnect();
                 Runtime.MessageCollector.AddExceptionMessage(
                     string.Format(Language.AutomaticReconnectError, connectionInfo.Hostname),
                     ex, MessageClass.WarningMsg, false);

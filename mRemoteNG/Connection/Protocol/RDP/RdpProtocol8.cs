@@ -96,11 +96,13 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 var size = Fullscreen
                     ? Screen.FromControl(Control).Bounds.Size
                     : Control.Size;
+                BeginAutomaticReconnect();
                 RdpClient8.Reconnect((uint)size.Width, (uint)size.Height);
                 ScrollToLowerRightAsync();
             }
             catch (Exception ex)
             {
+                EndAutomaticReconnect();
                 Runtime.MessageCollector.AddExceptionMessage(
                     string.Format(Language.ChangeConnectionResolutionError,
                         connectionInfo.Hostname),
@@ -110,6 +112,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private bool DoResize()
         {
+            if (ShouldUseFixedResolutionControlSize())
+                return false;
+
             Control.Location = InterfaceControl.Location;
             // kmscode - this doesn't look right to me. But I'm not aware of any functionality issues with this currently...
             if (!(Control.Size == InterfaceControl.Size) && !(InterfaceControl.Size == Size.Empty))
