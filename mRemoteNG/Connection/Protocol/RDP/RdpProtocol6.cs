@@ -58,15 +58,43 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private System.Windows.Forms.Timer _fullscreenPollTimer;
         private int _fullscreenPollAttempts;
         private bool _fullscreenPollExpectedState;
+        private System.Windows.Forms.Timer _fullscreenExitFinalizeTimer;
+        private int _fullscreenExitFinalizeAttempts;
+        private Control _rdpSafeFocusSink;
 
         private const int FullscreenPollMaxAttempts = 10;
         private const int FullscreenPollIntervalMs = 200;
+        private const int FullscreenExitFinalizeIntervalMs = 100;
+        private const int FullscreenExitFinalizeMaxAttempts = 15;
         private const int ScrollRetryMaxAttempts = 10;
         private const int ScrollRetryIntervalMs = 200;
         private const int FullscreenLeaveScrollDelayMs = 800;
         private const int SafeScrollViewportMultiplier = 5;
         private const int SafeScrollAbsoluteMaximum = 8192;
         private static readonly TimeSpan FullscreenLeaveCooldown = TimeSpan.FromSeconds(2);
+
+        private const int WM_CANCELMODE = 0x001F;
+        private const int WM_KILLFOCUS = 0x0008;
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumChildWindows(IntPtr hWndParent, EnumChildProc lpEnumFunc, IntPtr lParam);
+
+        private delegate bool EnumChildProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool ReleaseCapture();
+
+        [DllImport("user32.dll")]
+        private static extern bool ClipCursor(IntPtr lpRect);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetCapture();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SetFocus(IntPtr hWnd);
 
         #region Properties
 
@@ -370,6 +398,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 return;
             }
 
+            if (target)
+                StopFullscreenExitFinalizer($"{source} fullscreen enter");
+
             _fullscreenRequestedByMRemote = target;
             _fullscreenExitRequestedByMRemote = !target;
             SetRdpClientFullscreen(target, source);
@@ -453,6 +484,161 @@ namespace mRemoteNG.Connection.Protocol.RDP
             {
                 return false;
             }
+        }
+
+        private Control EnsureRdpSafeFocusSink()
+        {
+            if (InterfaceControl == null || InterfaceControl.IsDisposed)
+                return null;
+
+            if (_rdpSafeFocusSink != null &&
+                !_rdpSafeFocusSink.IsDisposed &&
+                _rdpSafeFocusSink.Parent == InterfaceControl)
+                return _rdpSafeFocusSink;
+
+            if (_rdpSafeFocusSink != null && !_rdpSafeFocusSink.IsDisposed)
+                _rdpSafeFocusSink.Dispose();
+
+            _rdpSafeFocusSink = new PassiveRdpFocusSink
+            {
+                Name = "PassiveRdpSafeFocusSink",
+                Size = new Size(1, 1),
+                Location = new Point(0, 0),
+                TabStop = true
+            };
+
+            InterfaceControl.Controls.Add(_rdpSafeFocusSink);
+            _rdpSafeFocusSink.BringToFront();
+
+            return _rdpSafeFocusSink;
+        }
+
+        private void StartFullscreenExitFinalizer(string source)
+        {
+            if (Control == null || Control.IsDisposed)
+                return;
+
+            if (Control.IsHandleCreated && Control.InvokeRequired)
+            {
+                Control.BeginInvoke(new Action(() => StartFullscreenExitFinalizer(source)));
+                return;
+            }
+
+            _fullscreenExitFinalizeAttempts = 0;
+
+            if (_fullscreenExitFinalizeTimer == null)
+            {
+                _fullscreenExitFinalizeTimer = new System.Windows.Forms.Timer { Interval = FullscreenExitFinalizeIntervalMs };
+                _fullscreenExitFinalizeTimer.Tick += FullscreenExitFinalizeTimerOnTick;
+            }
+
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP fullscreen exit finalizer started from {source} for host '{connectionInfo?.Hostname}'");
+
+            FinalizeRdpFullscreenExitOnce(source + " immediate");
+
+            _fullscreenExitFinalizeTimer.Stop();
+            _fullscreenExitFinalizeTimer.Start();
+        }
+
+        private void FullscreenExitFinalizeTimerOnTick(object sender, EventArgs e)
+        {
+            _fullscreenExitFinalizeAttempts++;
+            FinalizeRdpFullscreenExitOnce($"fullscreen exit finalizer attempt {_fullscreenExitFinalizeAttempts}");
+
+            if (_fullscreenExitFinalizeAttempts >= FullscreenExitFinalizeMaxAttempts)
+                StopFullscreenExitFinalizer("max attempts");
+        }
+
+        private void StopFullscreenExitFinalizer(string source)
+        {
+            if (_fullscreenExitFinalizeTimer == null)
+                return;
+
+            _fullscreenExitFinalizeTimer.Stop();
+            _fullscreenExitFinalizeAttempts = 0;
+
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP fullscreen exit finalizer stopped from {source} for host '{connectionInfo?.Hostname}'");
+        }
+
+        private void FinalizeRdpFullscreenExitOnce(string source)
+        {
+            try
+            {
+                if (_fullscreenRequestedByMRemote || _isRdpFullscreenActive)
+                    return;
+
+                if (_rdpClient != null)
+                {
+                    try
+                    {
+                        if (_rdpClient.FullScreen)
+                            _rdpClient.FullScreen = false;
+                    }
+                    catch
+                    {
+                    }
+                }
+
+                var captureBefore = GetCapture();
+
+                SendCancelModeToRdpWindows(source);
+
+                ReleaseCapture();
+                ClipCursor(IntPtr.Zero);
+                Cursor.Clip = Rectangle.Empty;
+
+                var sink = EnsureRdpSafeFocusSink();
+                if (sink != null)
+                {
+                    if (!sink.IsHandleCreated)
+                        sink.CreateControl();
+
+                    if (sink.IsHandleCreated)
+                    {
+                        sink.Focus();
+                        SetFocus(sink.Handle);
+                        sink.SendToBack();
+                    }
+                }
+
+                var captureAfter = GetCapture();
+
+                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                    $"RDP fullscreen exit finalized from {source} for host '{connectionInfo?.Hostname}': " +
+                    $"captureBefore={FormatHandle(captureBefore)}, captureAfter={FormatHandle(captureAfter)}, " +
+                    $"rdpFullScreen={TryReadRdpClientFullscreen(out var fs) && fs}, safeFocus={FormatControlName(sink)}");
+            }
+            catch (Exception ex)
+            {
+                Runtime.MessageCollector.AddExceptionMessage(
+                    $"RDP fullscreen exit finalizer failed from {source} for host '{connectionInfo?.Hostname}'",
+                    ex, MessageClass.WarningMsg, false);
+            }
+        }
+
+        private void SendCancelModeToRdpWindows(string source)
+        {
+            if (Control == null || Control.IsDisposed || !Control.IsHandleCreated)
+                return;
+
+            var count = 0;
+
+            SendMessage(Control.Handle, WM_CANCELMODE, IntPtr.Zero, IntPtr.Zero);
+            SendMessage(Control.Handle, WM_KILLFOCUS, IntPtr.Zero, IntPtr.Zero);
+            count++;
+
+            EnumChildWindows(Control.Handle, (hWnd, lParam) =>
+            {
+                SendMessage(hWnd, WM_CANCELMODE, IntPtr.Zero, IntPtr.Zero);
+                SendMessage(hWnd, WM_KILLFOCUS, IntPtr.Zero, IntPtr.Zero);
+                count++;
+                return true;
+            }, IntPtr.Zero);
+
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP fullscreen exit cancel-mode sent from {source} for host '{connectionInfo?.Hostname}': hwndCount={count}");
         }
 
         protected void ApplyFullscreenViewOnlyPolicy()
@@ -701,7 +887,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             _userManuallyDisabledViewOnly = false;
             _autoEnableViewOnlyAfterSuccessfulScroll = true;
-            SetViewOnly(false, $"{source} layout reset");
+            SetViewOnly(true, $"{source} fullscreen leave input shield");
+            StartFullscreenExitFinalizer(source);
             ResetPassiveScrollLayout(source);
             ScheduleSafeScrollAfterFullscreenLeave(source);
         }
@@ -1824,6 +2011,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void RDPEvent_OnEnterFullscreenMode()
         {
+            StopFullscreenExitFinalizer("OnEnterFullScreenMode");
             MarkRdpFullscreenActive(true, "OnEnterFullScreenMode");
             ApplyFullscreenViewOnlyPolicy("OnEnterFullScreenMode");
             StopScrollRetryTimer();
@@ -1840,6 +2028,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void RDPEvent_OnRequestGoFullscreen()
         {
+            StopFullscreenExitFinalizer("OnRequestGoFullScreen");
             _fullscreenRequestedByMRemote = true;
             MarkRdpFullscreenActive(true, "OnRequestGoFullScreen");
             ApplyFullscreenViewOnlyPolicy("OnRequestGoFullScreen");
@@ -1921,6 +2110,11 @@ namespace mRemoteNG.Connection.Protocol.RDP
             _scrollRetryTimer?.Stop();
             _scrollRetryTimer?.Dispose();
             _scrollRetryTimer = null;
+            _fullscreenExitFinalizeTimer?.Stop();
+            _fullscreenExitFinalizeTimer?.Dispose();
+            _fullscreenExitFinalizeTimer = null;
+            _rdpSafeFocusSink?.Dispose();
+            _rdpSafeFocusSink = null;
             _viewOnly = false;
             _userManuallyDisabledViewOnly = false;
             _autoEnableViewOnlyAfterSuccessfulScroll = false;
@@ -1934,6 +2128,14 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             ApplyRdpControlSizeForCurrentResolution("InterfaceControl.Resize");
             ScrollToLowerRightAsync("InterfaceControl.Resize");
+        }
+
+        private sealed class PassiveRdpFocusSink : Control
+        {
+            public PassiveRdpFocusSink()
+            {
+                SetStyle(ControlStyles.Selectable, true);
+            }
         }
         #endregion
 
