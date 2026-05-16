@@ -12,7 +12,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private const int MA_NOACTIVATEANDEAT = 4;
 
         private const int WM_SETFOCUS = 0x0007;
-        private const int WM_SETCURSOR = 0x0020;
         private const int WM_MOUSEACTIVATE = 0x0021;
         private const int WM_INPUT = 0x00FF;
         private const int WM_KEYDOWN = 0x0100;
@@ -136,7 +135,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
             switch (msg)
             {
                 case WM_SETFOCUS:
-                case WM_SETCURSOR:
                 case WM_MOUSEACTIVATE:
                 case WM_INPUT:
                 case WM_KEYDOWN:

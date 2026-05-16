@@ -45,7 +45,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private bool _autoEnableViewOnlyAfterSuccessfulScroll = true;
         private bool _automaticReconnectInProgress;
         private bool _suppressFocusOnAutomaticReconnect;
-        private bool _fullscreenLeaveMouseGuardActive;
         private bool _isRdpFullscreenActive;
         private bool _fullscreenRequestedByMRemote;
         private bool _fullscreenExitRequestedByMRemote;
@@ -54,8 +53,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private string _scrollRetrySource;
         private System.Windows.Forms.Timer _fullscreenLeaveScrollTimer;
         private string _fullscreenLeaveScrollSource;
-        private System.Windows.Forms.Timer _mouseCaptureReleaseTimer;
-        private int _mouseCaptureReleaseAttempts;
         private bool _applyingPassiveScrollLayout;
         private DateTime _fullscreenLeftAtUtc = DateTime.MinValue;
         private System.Windows.Forms.Timer _fullscreenPollTimer;
@@ -69,22 +66,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private const int FullscreenLeaveScrollDelayMs = 800;
         private const int SafeScrollViewportMultiplier = 5;
         private const int SafeScrollAbsoluteMaximum = 8192;
-        private const int MouseCaptureReleaseIntervalMs = 100;
-        private const int MouseCaptureReleaseMaxAttempts = 20;
-        private const int PassiveScrollEdgeNudgePx = 12;
         private static readonly TimeSpan FullscreenLeaveCooldown = TimeSpan.FromSeconds(2);
-
-        [DllImport("user32.dll")]
-        private static extern bool ReleaseCapture();
-
-        [DllImport("user32.dll")]
-        private static extern bool ClipCursor(IntPtr lpRect);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetCapture();
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr SetFocus(IntPtr hWnd);
 
         #region Properties
 
@@ -368,197 +350,16 @@ namespace mRemoteNG.Connection.Protocol.RDP
             var requested = value;
             var previous = _viewOnly;
             _viewOnly = requested;
-            var childHwndCount = ApplyRdpInputBlocker(source);
+            var controlAvailable = Control != null && !Control.IsDisposed;
+            var childHwndCount = controlAvailable ? InputBlocker.SetBlocked(Control, _viewOnly) : 0;
 
             Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                $"RDP ViewOnly state changed from {source} for host '{connectionInfo?.Hostname}': " +
+                $"RDP input blocker {(_viewOnly ? "enabled" : "disabled")} from {source} for host '{connectionInfo?.Hostname}': " +
                 $"host={FormatControlName(Control)}, controlHandle={FormatHandle(Control?.Handle ?? IntPtr.Zero)}, " +
                 $"childHWndCount={childHwndCount}, requestedViewOnly={requested}, appliedViewOnly={_viewOnly}, " +
-                $"previousViewOnly={previous}, fullscreenEffective={IsFullscreenEffective()}, " +
+                $"previousViewOnly={previous}, controlAvailable={controlAvailable}, fullscreenEffective={IsFullscreenEffective()}, " +
                 $"userManuallyDisabledViewOnly={_userManuallyDisabledViewOnly}, " +
                 $"autoEnableViewOnlyAfterSuccessfulScroll={_autoEnableViewOnlyAfterSuccessfulScroll}");
-        }
-
-        private int ApplyRdpInputBlocker(string source)
-        {
-            if (Control != null && !Control.IsDisposed && Control.IsHandleCreated && Control.InvokeRequired)
-            {
-                Control.BeginInvoke(new Action(() => ApplyRdpInputBlocker(source)));
-                return 0;
-            }
-
-            var shouldBlock = ShouldBlockRdpInput();
-            var controlAvailable = Control != null && !Control.IsDisposed;
-            var childHwndCount = controlAvailable ? InputBlocker.SetBlocked(Control, shouldBlock) : 0;
-
-            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                $"RDP input blocker {(shouldBlock ? "enabled" : "disabled")} from {source} for host '{connectionInfo?.Hostname}': " +
-                $"host={FormatControlName(Control)}, controlHandle={FormatHandle(Control?.Handle ?? IntPtr.Zero)}, " +
-                $"childHWndCount={childHwndCount}, shouldBlock={shouldBlock}, ViewOnly={_viewOnly}, " +
-                $"fullscreenLeaveMouseGuardActive={_fullscreenLeaveMouseGuardActive}, " +
-                $"automaticReconnectInProgress={_automaticReconnectInProgress}, " +
-                $"suppressFocusOnAutomaticReconnect={_suppressFocusOnAutomaticReconnect}");
-
-            return childHwndCount;
-        }
-
-        private bool ShouldBlockRdpInput()
-        {
-            return _viewOnly ||
-                   _fullscreenLeaveMouseGuardActive ||
-                   _automaticReconnectInProgress ||
-                   _suppressFocusOnAutomaticReconnect;
-        }
-
-        private void BeginFullscreenLeaveMouseGuard(string source)
-        {
-            if (Control != null && !Control.IsDisposed && Control.IsHandleCreated && Control.InvokeRequired)
-            {
-                _fullscreenLeaveMouseGuardActive = true;
-                Control.BeginInvoke(new Action(() => BeginFullscreenLeaveMouseGuard(source)));
-                return;
-            }
-
-            _fullscreenLeaveMouseGuardActive = true;
-            var childHwndCount = ApplyRdpInputBlocker($"{source} fullscreen leave mouse guard begin");
-            var capture = GetCapture();
-
-            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                $"RDP fullscreen leave mouse guard started from {source} for host '{connectionInfo?.Hostname}': " +
-                $"ViewOnly={_viewOnly}, guardActive={_fullscreenLeaveMouseGuardActive}, currentCapture={FormatHandle(capture)}, " +
-                $"controlHandle={FormatHandle(Control?.Handle ?? IntPtr.Zero)}, childHWndCount={childHwndCount}");
-
-            ForceReleaseRdpMouseCapture(source);
-            StartMouseCaptureReleaseTimer(source);
-        }
-
-        private void EndFullscreenLeaveMouseGuard(string source)
-        {
-            if (Control != null && !Control.IsDisposed && Control.IsHandleCreated && Control.InvokeRequired)
-            {
-                Control.BeginInvoke(new Action(() => EndFullscreenLeaveMouseGuard(source)));
-                return;
-            }
-
-            _fullscreenLeaveMouseGuardActive = false;
-            StopMouseCaptureReleaseTimer();
-            var childHwndCount = ApplyRdpInputBlocker($"{source} fullscreen leave mouse guard end");
-            var shouldBlock = ShouldBlockRdpInput();
-
-            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                $"RDP fullscreen leave mouse guard ended from {source} for host '{connectionInfo?.Hostname}': " +
-                $"ViewOnly={_viewOnly}, guardActive={_fullscreenLeaveMouseGuardActive}, finalShouldBlock={shouldBlock}, " +
-                $"controlHandle={FormatHandle(Control?.Handle ?? IntPtr.Zero)}, childHWndCount={childHwndCount}");
-        }
-
-        private void ForceReleaseRdpMouseCapture(string source)
-        {
-            try
-            {
-                var captureBefore = GetCapture();
-                ReleaseCapture();
-                ClipCursor(IntPtr.Zero);
-                Cursor.Clip = Rectangle.Empty;
-
-                var safeFocus = FindSafeFocusControl();
-                if (safeFocus != null && safeFocus.IsHandleCreated)
-                {
-                    safeFocus.Focus();
-                    SetFocus(safeFocus.Handle);
-                }
-
-                var captureAfter = GetCapture();
-
-                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                    $"RDP mouse capture released from {source} for host '{connectionInfo?.Hostname}': " +
-                    $"captureBefore={FormatHandle(captureBefore)}, captureAfter={FormatHandle(captureAfter)}, " +
-                    $"cursorClipReleased=True, safeFocus={FormatControlName(safeFocus)}");
-            }
-            catch (Exception ex)
-            {
-                Runtime.MessageCollector.AddExceptionMessage(
-                    $"RDP mouse capture release failed from {source} for host '{connectionInfo?.Hostname}'",
-                    ex, MessageClass.WarningMsg, false);
-            }
-        }
-
-        private Control FindSafeFocusControl()
-        {
-            var connectionTab = Control?.Parent?.Parent as ConnectionTab;
-            if (IsSafeFocusControl(connectionTab))
-                return connectionTab;
-
-            if (IsSafeFocusControl(InterfaceControl))
-                return InterfaceControl;
-
-            var parent = Control?.Parent;
-            while (parent != null)
-            {
-                if (IsSafeFocusControl(parent))
-                    return parent;
-
-                parent = parent.Parent;
-            }
-
-            return IsSafeFocusControl(_frmMain) ? _frmMain : null;
-        }
-
-        private bool IsSafeFocusControl(Control candidate)
-        {
-            return candidate != null &&
-                   !candidate.IsDisposed &&
-                   candidate.IsHandleCreated &&
-                   !ReferenceEquals(candidate, Control) &&
-                   !(candidate is AxHost);
-        }
-
-        private void StartMouseCaptureReleaseTimer(string source)
-        {
-            if (Control != null && !Control.IsDisposed && Control.IsHandleCreated && Control.InvokeRequired)
-            {
-                Control.BeginInvoke(new Action(() => StartMouseCaptureReleaseTimer(source)));
-                return;
-            }
-
-            _mouseCaptureReleaseAttempts = 0;
-            if (_mouseCaptureReleaseTimer == null)
-            {
-                _mouseCaptureReleaseTimer = new System.Windows.Forms.Timer { Interval = MouseCaptureReleaseIntervalMs };
-                _mouseCaptureReleaseTimer.Tick += MouseCaptureReleaseTimerOnTick;
-            }
-
-            _mouseCaptureReleaseTimer.Stop();
-            _mouseCaptureReleaseTimer.Start();
-        }
-
-        private void MouseCaptureReleaseTimerOnTick(object sender, EventArgs e)
-        {
-            _mouseCaptureReleaseAttempts++;
-            ForceReleaseRdpMouseCapture($"fullscreen leave mouse guard attempt {_mouseCaptureReleaseAttempts}");
-
-            if (_mouseCaptureReleaseAttempts < MouseCaptureReleaseMaxAttempts)
-                return;
-
-            if (_viewOnly)
-            {
-                EndFullscreenLeaveMouseGuard("fullscreen leave mouse guard max attempts with ViewOnly active");
-                return;
-            }
-
-            var attempts = _mouseCaptureReleaseAttempts;
-            StopMouseCaptureReleaseTimer();
-            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                $"RDP fullscreen leave mouse guard release timer stopped for host '{connectionInfo?.Hostname}' " +
-                $"after {attempts} attempts; guard remains active until ViewOnly is restored.");
-        }
-
-        private void StopMouseCaptureReleaseTimer()
-        {
-            if (_mouseCaptureReleaseTimer == null)
-                return;
-
-            _mouseCaptureReleaseTimer.Stop();
-            _mouseCaptureReleaseAttempts = 0;
         }
 
         private void SetFullscreenState(bool target, string source, bool startPolling)
@@ -568,9 +369,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 Control.BeginInvoke(new Action(() => SetFullscreenState(target, source, startPolling)));
                 return;
             }
-
-            if (!target)
-                BeginFullscreenLeaveMouseGuard(source);
 
             _fullscreenRequestedByMRemote = target;
             _fullscreenExitRequestedByMRemote = !target;
@@ -711,11 +509,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             if (read)
             {
                 if (!rdpFullscreen)
-                {
-                    if (!_fullscreenLeaveMouseGuardActive)
-                        BeginFullscreenLeaveMouseGuard("fullscreen polling");
                     _fullscreenExitRequestedByMRemote = false;
-                }
 
                 var shouldAdoptObservedState = rdpFullscreen == _fullscreenPollExpectedState ||
                                                !_fullscreenPollExpectedState ||
@@ -748,7 +542,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 $"requestedFullscreen={requestedFullscreen?.ToString() ?? "unchanged"}, " +
                 $"rdpClientFullScreen={rdpFullscreen}, isRdpFullscreenActive={_isRdpFullscreenActive}, " +
                 $"fullscreenRequestedByMRemote={_fullscreenRequestedByMRemote}, fullscreenExitRequestedByMRemote={_fullscreenExitRequestedByMRemote}, " +
-                $"ViewOnly={_viewOnly}, fullscreenLeaveMouseGuardActive={_fullscreenLeaveMouseGuardActive}, " +
+                $"ViewOnly={_viewOnly}, " +
                 $"userManuallyDisabledViewOnly={_userManuallyDisabledViewOnly}, " +
                 $"autoEnableViewOnlyAfterSuccessfulScroll={_autoEnableViewOnlyAfterSuccessfulScroll}");
         }
@@ -779,7 +573,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
             _automaticReconnectInProgress = true;
             _suppressFocusOnAutomaticReconnect = true;
-            ApplyRdpInputBlocker("BeginAutomaticReconnect");
             Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                 $"Suppressing RDP focus during automatic reconnect for host '{connectionInfo.Hostname}'");
         }
@@ -819,14 +612,13 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             _automaticReconnectInProgress = false;
             _suppressFocusOnAutomaticReconnect = false;
-            ApplyRdpInputBlocker("ClearAutomaticReconnectState");
             Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                 $"Released RDP automatic reconnect focus suppression for host '{connectionInfo.Hostname}'");
         }
 
         private bool ShouldSuppressRdpFocus()
         {
-            return ShouldBlockRdpInput();
+            return ViewOnly || _automaticReconnectInProgress || _suppressFocusOnAutomaticReconnect;
         }
 
         private void AllowAutoViewOnlyAfterPassiveScroll(string source)
@@ -907,9 +699,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void HandleFullscreenLeaveLayout(string source)
         {
-            BeginFullscreenLeaveMouseGuard(source);
             _userManuallyDisabledViewOnly = false;
             _autoEnableViewOnlyAfterSuccessfulScroll = true;
+            SetViewOnly(false, $"{source} layout reset");
             ResetPassiveScrollLayout(source);
             ScheduleSafeScrollAfterFullscreenLeave(source);
         }
@@ -1092,36 +884,24 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 if (!ValidatePassiveScrollInvariant(scrollable, surfaceSize, viewport, source))
                     return true;
 
-                var geometryTargetX = Math.Max(0, Control.Width - viewport.Width);
-                var geometryTargetY = Math.Max(0, Control.Height - viewport.Height);
-                var scrollbarTargetX = Math.Max(0, scrollable.HorizontalScroll.Maximum - scrollable.HorizontalScroll.LargeChange + 1);
-                var scrollbarTargetY = Math.Max(0, scrollable.VerticalScroll.Maximum - scrollable.VerticalScroll.LargeChange + 1);
-                var nudgeX = geometryTargetX > 0 ? PassiveScrollEdgeNudgePx : 0;
-                var nudgeY = geometryTargetY > 0 ? PassiveScrollEdgeNudgePx : 0;
-                var targetX = Math.Max(geometryTargetX, scrollbarTargetX);
-                var targetY = Math.Max(geometryTargetY, scrollbarTargetY);
-                targetX = Math.Min(targetX + nudgeX, geometryTargetX + nudgeX);
-                targetY = Math.Min(targetY + nudgeY, geometryTargetY + nudgeY);
+                var targetX = Math.Max(0, Control.Width - viewport.Width);
+                var targetY = Math.Max(0, Control.Height - viewport.Height);
 
                 if (targetX == 0 && targetY == 0)
                 {
                     scrollable.PerformLayout();
                     Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                        BuildScrollDiagnostics(attempt, source, scrollable, surfaceSize,
-                            geometryTargetX, geometryTargetY, scrollbarTargetX, scrollbarTargetY,
-                            nudgeX, nudgeY, targetX, targetY, true));
+                        BuildScrollDiagnostics(attempt, source, scrollable, surfaceSize, targetX, targetY, true));
                     EnableViewOnlyAfterSuccessfulPassiveLayout(source, false);
                     return true;
                 }
 
                 scrollable.AutoScrollPosition = new Point(targetX, targetY);
                 scrollable.PerformLayout();
-                var success = IsScrollAtTarget(scrollable, geometryTargetX, geometryTargetY);
+                var success = IsScrollAtTarget(scrollable, targetX, targetY);
 
                 Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                    BuildScrollDiagnostics(attempt, source, scrollable, surfaceSize,
-                        geometryTargetX, geometryTargetY, scrollbarTargetX, scrollbarTargetY,
-                        nudgeX, nudgeY, targetX, targetY, success));
+                    BuildScrollDiagnostics(attempt, source, scrollable, surfaceSize, targetX, targetY, success));
 
                 if (success)
                     EnableViewOnlyAfterSuccessfulPassiveLayout(source, true);
@@ -1342,9 +1122,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 if (Control.Size != surfaceSize)
                     Control.Size = surfaceSize;
 
-                var viewport = GetRdpViewportSize(scrollable);
                 scrollable.AutoScroll = true;
-                scrollable.AutoScrollMinSize = GetPassiveScrollMinSize(Control.Size, viewport);
+                scrollable.AutoScrollMinSize = Control.Size;
                 scrollable.PerformLayout();
             }
             finally
@@ -1355,7 +1134,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                 $"RDP passive scroll surface applied from {source} for host '{connectionInfo?.Hostname}': " +
                 $"Control.Location={FormatPoint(Control.Location)}, Control.Size={FormatSize(Control.Size)}, " +
-                $"AutoScrollMinSize={FormatSize(scrollable.AutoScrollMinSize)}, edgeNudge={PassiveScrollEdgeNudgePx}");
+                $"AutoScrollMinSize={FormatSize(scrollable.AutoScrollMinSize)}");
         }
 
         private void ApplyUnsafePassiveScrollFallback(ScrollableControl scrollable, Size viewport, string source)
@@ -1385,49 +1164,36 @@ namespace mRemoteNG.Connection.Protocol.RDP
             }
         }
 
-        private static Size GetPassiveScrollMinSize(Size controlSize, Size viewport)
-        {
-            var widthNudge = controlSize.Width > viewport.Width ? PassiveScrollEdgeNudgePx : 0;
-            var heightNudge = controlSize.Height > viewport.Height ? PassiveScrollEdgeNudgePx : 0;
-            return new Size(controlSize.Width + widthNudge, controlSize.Height + heightNudge);
-        }
-
         private bool ValidatePassiveScrollInvariant(ScrollableControl scrollable, Size surfaceSize, Size viewport, string source)
         {
-            var expectedMinSize = Control == null ? Size.Empty : GetPassiveScrollMinSize(Control.Size, viewport);
-            var autoScrollMatchesExpected = Control != null && SameSize(scrollable.AutoScrollMinSize, expectedMinSize);
+            var autoScrollMatchesControl = Control != null && SameSize(scrollable.AutoScrollMinSize, Control.Size);
             var controlMatchesSurface = Control != null && SameSize(Control.Size, surfaceSize);
             var originIsZero = Control != null && Control.Location == Point.Empty;
             var targetX = Control == null ? 0 : Math.Max(0, Control.Width - viewport.Width);
             var targetY = Control == null ? 0 : Math.Max(0, Control.Height - viewport.Height);
             var targetWithinSurface = Control != null &&
-                                      targetX <= Math.Max(0, scrollable.AutoScrollMinSize.Width - viewport.Width) &&
-                                      targetY <= Math.Max(0, scrollable.AutoScrollMinSize.Height - viewport.Height);
+                                      targetX <= Math.Max(0, Control.Width - viewport.Width) &&
+                                      targetY <= Math.Max(0, Control.Height - viewport.Height);
 
-            if (autoScrollMatchesExpected && controlMatchesSurface && originIsZero && targetWithinSurface)
+            if (autoScrollMatchesControl && controlMatchesSurface && originIsZero && targetWithinSurface)
                 return true;
 
             Runtime.MessageCollector.AddMessage(MessageClass.WarningMsg,
                 $"RDP passive scroll invariant failed for host '{connectionInfo?.Hostname}' from {source}: " +
                 $"AutoScrollMinSize={FormatSize(scrollable.AutoScrollMinSize)}, Control.Location={FormatPoint(Control?.Location ?? Point.Empty)}, " +
                 $"Control.Bounds={FormatRectangle(Control?.Bounds ?? Rectangle.Empty)}, Control.Size={FormatSize(Control?.Size ?? Size.Empty)}, " +
-                $"surfaceSize={FormatSize(surfaceSize)}, viewport={FormatSize(viewport)}, expectedMinSize={FormatSize(expectedMinSize)}, target={targetX},{targetY}, " +
-                $"autoScrollMatchesExpected={autoScrollMatchesExpected}, controlMatchesSurface={controlMatchesSurface}, " +
+                $"surfaceSize={FormatSize(surfaceSize)}, viewport={FormatSize(viewport)}, target={targetX},{targetY}, " +
+                $"autoScrollMatchesControl={autoScrollMatchesControl}, controlMatchesSurface={controlMatchesSurface}, " +
                 $"originIsZero={originIsZero}, targetWithinSurface={targetWithinSurface}");
             return false;
         }
 
-        private static bool IsScrollAtTarget(ScrollableControl scrollable, int geometryTargetX, int geometryTargetY)
+        private static bool IsScrollAtTarget(ScrollableControl scrollable, int targetX, int targetY)
         {
+            const int tolerance = 5;
             var final = scrollable.AutoScrollPosition;
-            return IsRealEdgeVisible(final.X, geometryTargetX) &&
-                   IsRealEdgeVisible(final.Y, geometryTargetY);
-        }
-
-        private static bool IsRealEdgeVisible(int scrollPosition, int geometryTarget)
-        {
-            const int tolerance = 2;
-            return Math.Abs(scrollPosition) >= Math.Max(0, geometryTarget - tolerance);
+            return Math.Abs(Math.Abs(final.X) - targetX) <= tolerance &&
+                   Math.Abs(Math.Abs(final.Y) - targetY) <= tolerance;
         }
 
         private void EnableViewOnlyAfterSuccessfulPassiveLayout(string source, bool scrollNeeded)
@@ -1450,9 +1216,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 ? "after successful passive scroll"
                 : "after successful passive scroll/stable layout");
             _autoEnableViewOnlyAfterSuccessfulScroll = false;
-            EndFullscreenLeaveMouseGuard(scrollNeeded
-                ? "after successful passive scroll"
-                : "after successful passive scroll/stable layout");
         }
 
         private static bool IsPositiveSize(Size size)
@@ -1466,28 +1229,24 @@ namespace mRemoteNG.Connection.Protocol.RDP
         }
 
         private string BuildScrollDiagnostics(int attempt, string source, ScrollableControl scrollable, Size contentSize,
-            int geometryTargetX, int geometryTargetY, int scrollbarTargetX, int scrollbarTargetY,
-            int nudgeX, int nudgeY, int targetX, int targetY, bool success)
+            int targetX, int targetY, bool success)
         {
             var horizontalScroll = scrollable.HorizontalScroll;
             var verticalScroll = scrollable.VerticalScroll;
             var desktopSize = GetRdpDesktopSize();
             var smartSize = IsSmartSizeEnabledSafe();
             var noScrollReason = GetNoScrollReason(scrollable, contentSize, smartSize);
-            var expectedMinSize = Control == null ? Size.Empty : GetPassiveScrollMinSize(Control.Size, scrollable.ClientSize);
-            var realRightVisible = IsRealEdgeVisible(scrollable.AutoScrollPosition.X, geometryTargetX);
-            var realBottomVisible = IsRealEdgeVisible(scrollable.AutoScrollPosition.Y, geometryTargetY);
             var invariant = Control != null &&
                             Control.Location == Point.Empty &&
                             SameSize(Control.Size, contentSize) &&
-                            SameSize(scrollable.AutoScrollMinSize, expectedMinSize);
+                            SameSize(scrollable.AutoScrollMinSize, Control.Size);
 
             return "RDP scroll lower-right attempt " + attempt +
                    $" from {source}" +
                    $" for host '{connectionInfo?.Hostname}': container={scrollable.Name}/{scrollable.GetType().FullName}, " +
                    $"InterfaceControl.ClientSize={FormatSize(InterfaceControl?.ClientSize ?? Size.Empty)}, " +
                    $"AutoScroll={scrollable.AutoScroll}, AutoScrollMinSize={FormatSize(scrollable.AutoScrollMinSize)}, " +
-                   $"DisplayRectangle={FormatRectangle(scrollable.DisplayRectangle)}, surfaceSize={FormatSize(contentSize)}, expectedMinSize={FormatSize(expectedMinSize)}, " +
+                   $"DisplayRectangle={FormatRectangle(scrollable.DisplayRectangle)}, surfaceSize={FormatSize(contentSize)}, " +
                    $"Control.Location={FormatPoint(Control?.Location ?? Point.Empty)}, Control.Size={FormatSize(Control?.Size ?? Size.Empty)}, " +
                    $"Control.Bounds={FormatRectangle(Control?.Bounds ?? Rectangle.Empty)}, Control.Right={Control?.Right ?? 0}, Control.Bottom={Control?.Bottom ?? 0}, " +
                    $"Control.ClientSize={FormatSize(Control?.ClientSize ?? Size.Empty)}, RdpDesktop={FormatSize(desktopSize)}, " +
@@ -1496,10 +1255,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                    $"Fullscreen={Fullscreen}, EffectiveFullscreen={IsFullscreenEffective()}, AutomaticResize={InterfaceControl?.Info?.AutomaticResize}, " +
                    $"HVisible={horizontalScroll.Visible}, HMax={horizontalScroll.Maximum}, HLarge={horizontalScroll.LargeChange}, HValue={horizontalScroll.Value}, " +
                    $"VVisible={verticalScroll.Visible}, VMax={verticalScroll.Maximum}, VLarge={verticalScroll.LargeChange}, VValue={verticalScroll.Value}, " +
-                   $"geometryTargetX={geometryTargetX}, geometryTargetY={geometryTargetY}, " +
-                   $"scrollbarTargetX={scrollbarTargetX}, scrollbarTargetY={scrollbarTargetY}, " +
-                   $"nudgeX={nudgeX}, nudgeY={nudgeY}, targetX={targetX}, targetY={targetY}, " +
-                   $"realRightVisible={realRightVisible}, realBottomVisible={realBottomVisible}, PassiveScrollMode={ShouldUsePassiveScrollMode()}, " +
+                   $"targetX={targetX}, targetY={targetY}, PassiveScrollMode={ShouldUsePassiveScrollMode()}, " +
                    $"noScrollReason={noScrollReason}, final={scrollable.AutoScrollPosition}, success={success}";
         }
 
@@ -2075,7 +1831,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void RDPEvent_OnLeaveFullscreenMode()
         {
-            BeginFullscreenLeaveMouseGuard("OnLeaveFullScreenMode");
             _fullscreenExitRequestedByMRemote = false;
             MarkRdpFullscreenActive(false, "OnLeaveFullScreenMode");
             ApplyFullscreenViewOnlyPolicy("OnLeaveFullScreenMode");
@@ -2093,7 +1848,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void RDPEvent_OnRequestLeaveFullscreen()
         {
-            BeginFullscreenLeaveMouseGuard("OnRequestLeaveFullScreen");
             _fullscreenExitRequestedByMRemote = true;
             MarkRdpFullscreenActive(false, "OnRequestLeaveFullScreen");
             ApplyFullscreenViewOnlyPolicy("OnRequestLeaveFullScreen");
@@ -2164,14 +1918,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
             _fullscreenLeaveScrollTimer?.Stop();
             _fullscreenLeaveScrollTimer?.Dispose();
             _fullscreenLeaveScrollTimer = null;
-            _mouseCaptureReleaseTimer?.Stop();
-            _mouseCaptureReleaseTimer?.Dispose();
-            _mouseCaptureReleaseTimer = null;
-            _mouseCaptureReleaseAttempts = 0;
             _scrollRetryTimer?.Stop();
             _scrollRetryTimer?.Dispose();
             _scrollRetryTimer = null;
-            _fullscreenLeaveMouseGuardActive = false;
             _viewOnly = false;
             _userManuallyDisabledViewOnly = false;
             _autoEnableViewOnlyAfterSuccessfulScroll = false;
