@@ -1058,16 +1058,29 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
             _passiveTabActivationScrollTimer.Stop();
 
-            try
+            var scrollable = FindRdpScrollContainer();
+            var alreadyAtLowerRight = IsCurrentPassiveScrollAtLowerRight(scrollable, out var targetX, out var targetY);
+
+            if (!alreadyAtLowerRight)
             {
-                Control.BeginInvoke(new Action(() =>
+                try
+                {
+                    Control.BeginInvoke(new Action(() =>
+                    {
+                        ScrollToLowerRightAsync(source + " immediate");
+                    }));
+                }
+                catch
                 {
                     ScrollToLowerRightAsync(source + " immediate");
-                }));
+                }
             }
-            catch
+            else
             {
-                ScrollToLowerRightAsync(source + " immediate");
+                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                    $"RDP passive tab activation immediate scroll skipped from {source} for host '{connectionInfo?.Hostname}': " +
+                    $"already at lower-right targetX={targetX}, targetY={targetY}, " +
+                    $"AutoScrollPosition={FormatPoint(scrollable?.AutoScrollPosition ?? Point.Empty)}");
             }
 
             _passiveTabActivationScrollTimer.Start();
@@ -1090,13 +1103,16 @@ namespace mRemoteNG.Connection.Protocol.RDP
             var effectiveFullscreen = IsFullscreenEffective();
             var rdpClientFullscreen = IsRdpClientFullscreenActiveSafe();
             var fullscreen = effectiveFullscreen || rdpClientFullscreen;
+            var keepScrollable = ShouldKeepRdpControlScrollable();
+            var alreadyAtLowerRight = IsCurrentPassiveScrollAtLowerRight(scrollable, out var targetX, out var targetY);
 
             Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                 $"RDP passive tab activation scroll restore attempt {_passiveTabActivationScrollAttempts} " +
                 $"from {_passiveTabActivationScrollSource} for host '{connectionInfo?.Hostname}': " +
                 $"AutoScrollPositionBefore={FormatPoint(scrollable?.AutoScrollPosition ?? Point.Empty)}, " +
                 $"ViewOnly={ViewOnly}, Fullscreen={fullscreen}, EffectiveFullscreen={effectiveFullscreen}, " +
-                $"RdpClientFullscreen={rdpClientFullscreen}, ShouldKeepRdpControlScrollable={ShouldKeepRdpControlScrollable()}");
+                $"RdpClientFullscreen={rdpClientFullscreen}, ShouldKeepRdpControlScrollable={keepScrollable}, " +
+                $"targetX={targetX}, targetY={targetY}, alreadyAtLowerRight={alreadyAtLowerRight}");
 
             if (fullscreen)
             {
@@ -1105,6 +1121,18 @@ namespace mRemoteNG.Connection.Protocol.RDP
             }
 
             if (!ViewOnly)
+            {
+                StopPassiveTabActivationScrollTimer();
+                return;
+            }
+
+            if (!keepScrollable)
+            {
+                StopPassiveTabActivationScrollTimer();
+                return;
+            }
+
+            if (alreadyAtLowerRight)
             {
                 StopPassiveTabActivationScrollTimer();
                 return;
@@ -1516,6 +1544,24 @@ namespace mRemoteNG.Connection.Protocol.RDP
             var final = scrollable.AutoScrollPosition;
             return Math.Abs(Math.Abs(final.X) - targetX) <= tolerance &&
                    Math.Abs(Math.Abs(final.Y) - targetY) <= tolerance;
+        }
+
+        private bool IsCurrentPassiveScrollAtLowerRight(ScrollableControl scrollable, out int targetX, out int targetY)
+        {
+            targetX = 0;
+            targetY = 0;
+
+            if (Control == null || Control.IsDisposed || scrollable == null || scrollable.IsDisposed)
+                return false;
+
+            var viewport = GetRdpViewportSize(scrollable);
+            if (!IsPositiveSize(viewport))
+                return false;
+
+            targetX = Math.Max(0, Control.Width - viewport.Width);
+            targetY = Math.Max(0, Control.Height - viewport.Height);
+
+            return IsScrollAtTarget(scrollable, targetX, targetY);
         }
 
         private void EnableViewOnlyAfterSuccessfulPassiveLayout(string source, bool scrollNeeded)
