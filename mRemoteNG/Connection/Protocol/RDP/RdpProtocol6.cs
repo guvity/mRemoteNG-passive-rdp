@@ -44,6 +44,25 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private bool _userDisabledViewOnlyInFullscreen;
         private bool _automaticReconnectInProgress;
         private bool _suppressFocusOnAutomaticReconnect;
+        private bool _isRdpFullscreenActive;
+        private bool _fullscreenRequestedByMRemote;
+        private bool _fullscreenExitRequestedByMRemote;
+        private Panel _scrollBottomRightTarget;
+        private System.Windows.Forms.Timer _fullscreenPollTimer;
+        private int _fullscreenPollAttempts;
+        private bool _fullscreenPollExpectedState;
+
+        private const int FullscreenPollMaxAttempts = 10;
+        private const int FullscreenPollIntervalMs = 200;
+        private const int ScrollRetryMaxAttempts = 15;
+        private const int ScrollRetryIntervalMs = 200;
+        private const int WM_HSCROLL = 0x0114;
+        private const int WM_VSCROLL = 0x0115;
+        private const int SB_BOTTOM = 7;
+        private const int SB_RIGHT = 7;
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
         #region Properties
 
@@ -55,11 +74,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         public virtual bool Fullscreen
         {
-            get => _rdpClient.FullScreen;
+            get => IsFullscreenEffective();
             protected set
             {
-                _rdpClient.FullScreen = value;
-                ApplyFullscreenViewOnlyPolicy();
+                SetFullscreenState(value, "Fullscreen setter", true);
             }
         }
 
@@ -132,6 +150,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 if (!InitializeActiveXControl())
                     return false;
 
+                InterfaceControl.Resize += InterfaceControl_Resize;
                 _rdpVersion = new Version(_rdpClient.Version);
                 SetRdpClientProperties();
                 return true;
@@ -148,6 +167,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
             try
             {
                 Control.GotFocus += RdpClient_GotFocus;
+                Control.HandleCreated += RdpClient_HandleCreated;
+                Control.ParentChanged += RdpClient_ParentChanged;
+                Control.Disposed += RdpClient_Disposed;
                 Control.CreateControl();
                 while (!Control.Created)
                 {
@@ -157,6 +179,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 Control.Anchor = AnchorStyles.None;
 
                 _rdpClient = (MsRdpClient6NotSafeForScripting)((AxHost)Control).GetOcx();
+                ScrollToLowerRightAsync();
                 return true;
             }
             catch (COMException ex)
@@ -215,7 +238,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             try
             {
-                Fullscreen = !Fullscreen;
+                var target = !IsFullscreenEffective();
+                SetFullscreenState(target, "ToggleFullscreen", true);
             }
             catch (Exception ex)
             {
@@ -243,16 +267,18 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             try
             {
-                if (!Fullscreen)
+                if (!IsFullscreenEffective())
                 {
                     _userDisabledViewOnlyInFullscreen = false;
-                    SetViewOnly(false);
+                    SetViewOnly(false, "ToggleViewOnly outside fullscreen");
+                    LogFullscreenState("ToggleViewOnly outside fullscreen", false);
                     return;
                 }
 
                 var enabled = !ViewOnly;
                 _userDisabledViewOnlyInFullscreen = !enabled;
-                SetViewOnly(enabled);
+                SetViewOnly(enabled, "ToggleViewOnly");
+                LogFullscreenState("ToggleViewOnly", enabled);
             }
             catch
             {
@@ -301,6 +327,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         public override void ResizeEnd(object sender, EventArgs e)
         {
+            ApplyRdpControlSizeForCurrentResolution();
             ScrollToLowerRightAsync();
         }
         #endregion
@@ -310,42 +337,205 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void SetViewOnly(bool value)
         {
+            SetViewOnly(value, "SetViewOnly");
+        }
+
+        private void SetViewOnly(bool value, string source)
+        {
             if (Control != null && Control.IsHandleCreated && Control.InvokeRequired)
             {
-                Control.BeginInvoke(new Action(() => SetViewOnly(value)));
+                Control.BeginInvoke(new Action(() => SetViewOnly(value, source)));
                 return;
             }
 
-            if (!Fullscreen)
+            if (!IsFullscreenEffective())
                 value = false;
 
+            var previous = _viewOnly;
             _viewOnly = value;
-            InputBlocker.SetBlocked(Control, _viewOnly);
+            var childHwndCount = InputBlocker.SetBlocked(Control, _viewOnly);
+
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP input blocker {(_viewOnly ? "enabled" : "disabled")} from {source} for host '{connectionInfo?.Hostname}': " +
+                $"host={FormatControlName(Control)}, controlHandle={FormatHandle(Control?.Handle ?? IntPtr.Zero)}, " +
+                $"childHWndCount={childHwndCount}, ViewOnly={_viewOnly}, previousViewOnly={previous}");
+        }
+
+        private void SetFullscreenState(bool target, string source, bool startPolling)
+        {
+            if (Control != null && Control.IsHandleCreated && Control.InvokeRequired)
+            {
+                Control.BeginInvoke(new Action(() => SetFullscreenState(target, source, startPolling)));
+                return;
+            }
+
+            _fullscreenRequestedByMRemote = target;
+            _fullscreenExitRequestedByMRemote = !target;
+            SetRdpClientFullscreen(target, source);
+            MarkRdpFullscreenActive(target, source);
+            ApplyFullscreenViewOnlyPolicy(source);
+            ScrollToLowerRightAsync();
+
+            if (startPolling)
+                StartFullscreenPolling(source, target);
+        }
+
+        private void SetRdpClientFullscreen(bool target, string source)
+        {
+            try
+            {
+                if (_rdpClient == null)
+                    return;
+
+                _rdpClient.FullScreen = target;
+            }
+            catch (Exception ex)
+            {
+                Runtime.MessageCollector.AddExceptionMessage(
+                    $"RDP fullscreen request from {source} failed for host '{connectionInfo?.Hostname}'",
+                    ex, MessageClass.WarningMsg, false);
+            }
+        }
+
+        private void MarkRdpFullscreenActive(bool active, string source)
+        {
+            _isRdpFullscreenActive = active;
+
+            if (active)
+            {
+                _fullscreenExitRequestedByMRemote = false;
+            }
+            else
+            {
+                _fullscreenRequestedByMRemote = false;
+                _userDisabledViewOnlyInFullscreen = false;
+                _fullscreenExitRequestedByMRemote =
+                    TryReadRdpClientFullscreen(out var rdpFullscreen) && rdpFullscreen;
+            }
+
+            LogFullscreenState(source, active);
+        }
+
+        private bool IsFullscreenEffective()
+        {
+            if (_fullscreenExitRequestedByMRemote)
+                return false;
+
+            if (_isRdpFullscreenActive || _fullscreenRequestedByMRemote)
+                return true;
+
+            return TryReadRdpClientFullscreen(out var rdpFullscreen) && rdpFullscreen;
+        }
+
+        private bool TryReadRdpClientFullscreen(out bool fullscreen)
+        {
+            fullscreen = false;
+
+            try
+            {
+                if (_rdpClient == null)
+                    return false;
+
+                fullscreen = _rdpClient.FullScreen;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
 
         protected void ApplyFullscreenViewOnlyPolicy()
+        {
+            ApplyFullscreenViewOnlyPolicy("ApplyFullscreenViewOnlyPolicy");
+        }
+
+        protected void ApplyFullscreenViewOnlyPolicy(string source)
         {
             if (Control == null || _rdpClient == null)
                 return;
 
             if (Control.IsHandleCreated && Control.InvokeRequired)
             {
-                Control.BeginInvoke(new Action(ApplyFullscreenViewOnlyPolicy));
+                Control.BeginInvoke(new Action(() => ApplyFullscreenViewOnlyPolicy(source)));
                 return;
             }
 
-            if (Fullscreen)
+            if (IsFullscreenEffective())
             {
                 if (!_userDisabledViewOnlyInFullscreen)
-                    SetViewOnly(true);
+                    SetViewOnly(true, source);
             }
             else
             {
                 _userDisabledViewOnlyInFullscreen = false;
-                SetViewOnly(false);
+                SetViewOnly(false, source);
             }
 
+            LogFullscreenState(source, null);
             ScrollToLowerRightAsync();
+        }
+
+        private void StartFullscreenPolling(string source, bool expectedState)
+        {
+            if (Control == null || Control.IsDisposed)
+                return;
+
+            _fullscreenPollExpectedState = expectedState;
+            _fullscreenPollAttempts = 0;
+
+            if (_fullscreenPollTimer == null)
+            {
+                _fullscreenPollTimer = new System.Windows.Forms.Timer { Interval = FullscreenPollIntervalMs };
+                _fullscreenPollTimer.Tick += FullscreenPollTimerOnTick;
+            }
+
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"Starting RDP fullscreen polling from {source} for host '{connectionInfo?.Hostname}': expected={expectedState}");
+
+            _fullscreenPollTimer.Stop();
+            _fullscreenPollTimer.Start();
+        }
+
+        private void FullscreenPollTimerOnTick(object sender, EventArgs e)
+        {
+            _fullscreenPollAttempts++;
+
+            var read = TryReadRdpClientFullscreen(out var rdpFullscreen);
+            if (read)
+            {
+                if (!rdpFullscreen)
+                    _fullscreenExitRequestedByMRemote = false;
+
+                var shouldAdoptObservedState = rdpFullscreen == _fullscreenPollExpectedState ||
+                                               !_fullscreenPollExpectedState ||
+                                               _fullscreenPollAttempts >= FullscreenPollMaxAttempts;
+
+                if (shouldAdoptObservedState && rdpFullscreen != _isRdpFullscreenActive)
+                    MarkRdpFullscreenActive(rdpFullscreen, "fullscreen polling");
+            }
+
+            ApplyFullscreenViewOnlyPolicy("fullscreen polling");
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP fullscreen polling attempt {_fullscreenPollAttempts} for host '{connectionInfo?.Hostname}': " +
+                $"read={read}, observed={rdpFullscreen}, expected={_fullscreenPollExpectedState}");
+
+            if (_fullscreenPollAttempts < FullscreenPollMaxAttempts)
+                return;
+
+            _fullscreenPollTimer.Stop();
+        }
+
+        private void LogFullscreenState(string source, bool? requestedFullscreen)
+        {
+            TryReadRdpClientFullscreen(out var rdpFullscreen);
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP fullscreen state source={source} for host '{connectionInfo?.Hostname}': " +
+                $"requestedFullscreen={requestedFullscreen?.ToString() ?? "unchanged"}, " +
+                $"rdpClientFullScreen={rdpFullscreen}, isRdpFullscreenActive={_isRdpFullscreenActive}, " +
+                $"fullscreenRequestedByMRemote={_fullscreenRequestedByMRemote}, fullscreenExitRequestedByMRemote={_fullscreenExitRequestedByMRemote}, " +
+                $"ViewOnly={_viewOnly}, " +
+                $"userDisabledViewOnlyInFullscreen={_userDisabledViewOnlyInFullscreen}");
         }
 
         protected void ScrollToLowerRightAsync()
@@ -420,14 +610,14 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private void StartScrollToLowerRightRetries()
         {
             var attempt = 0;
-            var timer = new System.Windows.Forms.Timer { Interval = 200 };
+            var timer = new System.Windows.Forms.Timer { Interval = ScrollRetryIntervalMs };
             EventHandler tick = null;
             tick = (sender, args) =>
             {
                 attempt++;
                 ScrollToLowerRight(attempt);
 
-                if (attempt < 8)
+                if (attempt < ScrollRetryMaxAttempts)
                     return;
 
                 timer.Stop();
@@ -455,22 +645,30 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 }
 
                 scrollable.AutoScroll = true;
+                var contentSize = GetRdpScrollContentSize(scrollable);
+                scrollable.AutoScrollMinSize = contentSize;
+                var dummyTarget = EnsureScrollBottomRightTarget(scrollable, contentSize);
                 scrollable.PerformLayout();
 
                 var horizontalScroll = scrollable.HorizontalScroll;
                 var verticalScroll = scrollable.VerticalScroll;
-                var targetX = Math.Max(0, horizontalScroll.Maximum - horizontalScroll.LargeChange + 1);
-                var targetY = Math.Max(0, verticalScroll.Maximum - verticalScroll.LargeChange + 1);
+                var targetX = Math.Max(
+                    Math.Max(0, contentSize.Width - scrollable.ClientSize.Width),
+                    Math.Max(0, horizontalScroll.Maximum - horizontalScroll.LargeChange + 1));
+                var targetY = Math.Max(
+                    Math.Max(0, contentSize.Height - scrollable.ClientSize.Height),
+                    Math.Max(0, verticalScroll.Maximum - verticalScroll.LargeChange + 1));
+
+                var scrollControlIntoViewCalled = dummyTarget != null;
+                if (dummyTarget != null)
+                    scrollable.ScrollControlIntoView(dummyTarget);
 
                 scrollable.AutoScrollPosition = new Point(targetX, targetY);
+                var win32ScrollFallbackCalled = SendScrollbarBottomRight(scrollable, targetX, targetY);
 
                 Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                    "RDP scroll lower-right attempt " + attempt +
-                    $" for host '{connectionInfo.Hostname}': container={scrollable.Name}/{scrollable.GetType().FullName}, " +
-                    $"AutoScroll={scrollable.AutoScroll}, HVisible={horizontalScroll.Visible}, VVisible={verticalScroll.Visible}, " +
-                    $"HMax={horizontalScroll.Maximum}, HLarge={horizontalScroll.LargeChange}, HValue={horizontalScroll.Value}, " +
-                    $"VMax={verticalScroll.Maximum}, VLarge={verticalScroll.LargeChange}, VValue={verticalScroll.Value}, " +
-                    $"targetX={targetX}, targetY={targetY}, final={scrollable.AutoScrollPosition}");
+                    BuildScrollDiagnostics(attempt, scrollable, contentSize, targetX, targetY,
+                        scrollControlIntoViewCalled, win32ScrollFallbackCalled));
             }
             catch (Exception ex)
             {
@@ -497,19 +695,25 @@ namespace mRemoteNG.Connection.Protocol.RDP
             return null;
         }
 
-        private void ApplyRdpControlSizeForCurrentResolution()
+        protected void ApplyRdpControlSizeForCurrentResolution()
         {
-            if (Control == null || _rdpClient == null || !ShouldUseFixedResolutionControlSize())
+            if (Control == null || _rdpClient == null || !ShouldKeepRdpControlScrollable())
                 return;
 
-            var width = _rdpClient.DesktopWidth;
-            var height = _rdpClient.DesktopHeight;
-            if (width <= 0 || height <= 0)
+            var targetSize = GetRdpScrollContentSize(FindRdpScrollContainer());
+            if (targetSize.Width <= 0 || targetSize.Height <= 0)
                 return;
 
-            var targetSize = new Size(width, height);
+            if (Control.Location != Point.Empty)
+                Control.Location = Point.Empty;
+
             if (Control.Size != targetSize)
                 Control.Size = targetSize;
+        }
+
+        protected bool ShouldKeepRdpControlScrollable()
+        {
+            return ShouldUseFixedResolutionControlSize() || ShouldUsePassiveScrollMode();
         }
 
         protected bool ShouldUseFixedResolutionControlSize()
@@ -520,6 +724,202 @@ namespace mRemoteNG.Connection.Protocol.RDP
             return InterfaceControl.Info.Resolution != RDPResolutions.FitToWindow &&
                    InterfaceControl.Info.Resolution != RDPResolutions.SmartSize &&
                    InterfaceControl.Info.Resolution != RDPResolutions.Fullscreen;
+        }
+
+        private bool ShouldUsePassiveScrollMode()
+        {
+            if (InterfaceControl?.Info == null || Force.HasFlag(ConnectionInfo.Force.Fullscreen))
+                return false;
+
+            if (InterfaceControl.Info.Resolution == RDPResolutions.SmartSize || IsSmartSizeEnabledSafe())
+                return false;
+
+            return InterfaceControl.Info.Resolution == RDPResolutions.FitToWindow ||
+                   InterfaceControl.Info.Resolution == RDPResolutions.Fullscreen ||
+                   IsFullscreenEffective();
+        }
+
+        private Size GetRdpScrollContentSize(ScrollableControl scrollable)
+        {
+            var contentSize = Size.Empty;
+            contentSize = MaxSize(contentSize, Control?.Size ?? Size.Empty);
+            contentSize = MaxSize(contentSize, GetRdpDesktopSize());
+            contentSize = MaxSize(contentSize, GetConfiguredResolutionSize());
+
+            if (ShouldUsePassiveScrollMode())
+                contentSize = MaxSize(contentSize, GetPassiveFallbackDesktopSize(scrollable));
+
+            if (scrollable != null)
+                contentSize = MaxSize(contentSize, scrollable.ClientSize);
+
+            return contentSize;
+        }
+
+        private Size GetRdpDesktopSize()
+        {
+            try
+            {
+                if (_rdpClient == null)
+                    return Size.Empty;
+
+                return new Size(Math.Max(0, _rdpClient.DesktopWidth), Math.Max(0, _rdpClient.DesktopHeight));
+            }
+            catch
+            {
+                return Size.Empty;
+            }
+        }
+
+        private Size GetConfiguredResolutionSize()
+        {
+            if (InterfaceControl?.Info == null)
+                return Size.Empty;
+
+            var resolution = InterfaceControl.Info.Resolution.GetResolutionRectangle();
+            return new Size(Math.Max(0, resolution.Width), Math.Max(0, resolution.Height));
+        }
+
+        private Size GetPassiveFallbackDesktopSize(ScrollableControl scrollable)
+        {
+            try
+            {
+                var screen = Control != null
+                    ? Screen.FromControl(Control).Bounds.Size
+                    : Screen.PrimaryScreen.Bounds.Size;
+
+                return MaxSize(screen, scrollable?.ClientSize ?? Size.Empty);
+            }
+            catch
+            {
+                return scrollable?.ClientSize ?? Size.Empty;
+            }
+        }
+
+        private Panel EnsureScrollBottomRightTarget(ScrollableControl scrollable, Size contentSize)
+        {
+            if (scrollable == null || scrollable.IsDisposed)
+                return null;
+
+            if (_scrollBottomRightTarget == null || _scrollBottomRightTarget.IsDisposed)
+            {
+                _scrollBottomRightTarget = new Panel
+                {
+                    Name = "PassiveRdpScrollBottomRightTarget",
+                    Size = new Size(1, 1),
+                    Enabled = false,
+                    TabStop = false,
+                    BackColor = scrollable.BackColor,
+                    Visible = true
+                };
+            }
+
+            if (_scrollBottomRightTarget.Parent != scrollable)
+                scrollable.Controls.Add(_scrollBottomRightTarget);
+
+            _scrollBottomRightTarget.Location = new Point(
+                Math.Max(0, contentSize.Width - _scrollBottomRightTarget.Width),
+                Math.Max(0, contentSize.Height - _scrollBottomRightTarget.Height));
+            _scrollBottomRightTarget.SendToBack();
+            return _scrollBottomRightTarget;
+        }
+
+        private bool SendScrollbarBottomRight(ScrollableControl scrollable, int targetX, int targetY)
+        {
+            if (scrollable == null || !scrollable.IsHandleCreated)
+                return false;
+
+            if (targetX > 0)
+                SendMessage(scrollable.Handle, WM_HSCROLL, new IntPtr(SB_RIGHT), IntPtr.Zero);
+
+            if (targetY > 0)
+                SendMessage(scrollable.Handle, WM_VSCROLL, new IntPtr(SB_BOTTOM), IntPtr.Zero);
+
+            return targetX > 0 || targetY > 0;
+        }
+
+        private string BuildScrollDiagnostics(int attempt, ScrollableControl scrollable, Size contentSize,
+            int targetX, int targetY, bool scrollControlIntoViewCalled, bool win32ScrollFallbackCalled)
+        {
+            var horizontalScroll = scrollable.HorizontalScroll;
+            var verticalScroll = scrollable.VerticalScroll;
+            var desktopSize = GetRdpDesktopSize();
+            var smartSize = IsSmartSizeEnabledSafe();
+            var noScrollReason = GetNoScrollReason(scrollable, contentSize, smartSize);
+
+            return "RDP scroll lower-right attempt " + attempt +
+                   $" for host '{connectionInfo?.Hostname}': container={scrollable.Name}/{scrollable.GetType().FullName}, " +
+                   $"InterfaceControl.ClientSize={FormatSize(InterfaceControl?.ClientSize ?? Size.Empty)}, " +
+                   $"AutoScroll={scrollable.AutoScroll}, AutoScrollMinSize={FormatSize(scrollable.AutoScrollMinSize)}, " +
+                   $"DisplayRectangle={FormatRectangle(scrollable.DisplayRectangle)}, contentSize={FormatSize(contentSize)}, " +
+                   $"Control.Location={FormatPoint(Control?.Location ?? Point.Empty)}, Control.Size={FormatSize(Control?.Size ?? Size.Empty)}, " +
+                   $"Control.ClientSize={FormatSize(Control?.ClientSize ?? Size.Empty)}, RdpDesktop={FormatSize(desktopSize)}, " +
+                   $"Info.Resolution={InterfaceControl?.Info?.Resolution}, SmartSize={smartSize}, " +
+                   $"Fullscreen={Fullscreen}, EffectiveFullscreen={IsFullscreenEffective()}, AutomaticResize={InterfaceControl?.Info?.AutomaticResize}, " +
+                   $"HVisible={horizontalScroll.Visible}, HMax={horizontalScroll.Maximum}, HLarge={horizontalScroll.LargeChange}, HValue={horizontalScroll.Value}, " +
+                   $"VVisible={verticalScroll.Visible}, VMax={verticalScroll.Maximum}, VLarge={verticalScroll.LargeChange}, VValue={verticalScroll.Value}, " +
+                   $"targetX={targetX}, targetY={targetY}, dummyExists={_scrollBottomRightTarget != null && !_scrollBottomRightTarget.IsDisposed}, " +
+                   $"dummyLocation={FormatPoint(_scrollBottomRightTarget?.Location ?? Point.Empty)}, " +
+                   $"ScrollControlIntoView={scrollControlIntoViewCalled}, Win32ScrollFallback={win32ScrollFallbackCalled}, " +
+                   $"PassiveScrollMode={ShouldUsePassiveScrollMode()}, noScrollReason={noScrollReason}, final={scrollable.AutoScrollPosition}";
+        }
+
+        private string GetNoScrollReason(ScrollableControl scrollable, Size contentSize, bool smartSize)
+        {
+            if (smartSize || InterfaceControl?.Info?.Resolution == RDPResolutions.SmartSize)
+                return "SmartSize is active; ActiveX scales the remote desktop, so WinForms scrollbars are not expected.";
+
+            if (contentSize.Width <= scrollable.ClientSize.Width && contentSize.Height <= scrollable.ClientSize.Height)
+                return "Content size is not larger than viewport; scrollbars are physically unavailable.";
+
+            if (!scrollable.HorizontalScroll.Visible && !scrollable.VerticalScroll.Visible)
+                return "Scrollable content is larger than viewport, but WinForms has not exposed scrollbars yet; retrying and using passive fallback.";
+
+            return "Scrollbars available or not required on one axis.";
+        }
+
+        private bool IsSmartSizeEnabledSafe()
+        {
+            try
+            {
+                return _rdpClient != null && SmartSize;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static Size MaxSize(Size first, Size second)
+        {
+            return new Size(Math.Max(first.Width, second.Width), Math.Max(first.Height, second.Height));
+        }
+
+        private static string FormatSize(Size size)
+        {
+            return $"{size.Width}x{size.Height}";
+        }
+
+        private static string FormatPoint(Point point)
+        {
+            return $"{point.X},{point.Y}";
+        }
+
+        private static string FormatRectangle(Rectangle rectangle)
+        {
+            return $"{rectangle.X},{rectangle.Y},{rectangle.Width}x{rectangle.Height}";
+        }
+
+        private static string FormatHandle(IntPtr handle)
+        {
+            return handle == IntPtr.Zero ? "0x0" : "0x" + handle.ToInt64().ToString("X");
+        }
+
+        private static string FormatControlName(Control control)
+        {
+            if (control == null)
+                return "<null>";
+
+            return $"{control.Name}/{control.GetType().FullName}";
         }
 
         private void SetRdpClientProperties()
@@ -561,7 +961,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             SetAuthenticationLevel();
             SetLoadBalanceInfo();
             SetRdGateway();
-            ApplyFullscreenViewOnlyPolicy();
+            ApplyFullscreenViewOnlyPolicy("SetRdpClientProperties");
 
             _rdpClient.ColorDepth = (int)connectionInfo.Colors;
 
@@ -789,7 +1189,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
                 if (Force.HasFlag(ConnectionInfo.Force.Fullscreen))
                 {
-                    _rdpClient.FullScreen = true;
+                    _fullscreenRequestedByMRemote = true;
+                    _fullscreenExitRequestedByMRemote = false;
+                    SetRdpClientFullscreen(true, "SetResolution Force.Fullscreen");
+                    MarkRdpFullscreenActive(true, "SetResolution Force.Fullscreen");
                     _rdpClient.DesktopWidth = Screen.FromControl(_frmMain).Bounds.Width;
                     _rdpClient.DesktopHeight = Screen.FromControl(_frmMain).Bounds.Height;
 
@@ -809,7 +1212,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 }
                 else if (InterfaceControl.Info.Resolution == RDPResolutions.Fullscreen)
                 {
-                    _rdpClient.FullScreen = true;
+                    _fullscreenRequestedByMRemote = true;
+                    _fullscreenExitRequestedByMRemote = false;
+                    SetRdpClientFullscreen(true, "SetResolution Resolution.Fullscreen");
+                    MarkRdpFullscreenActive(true, "SetResolution Resolution.Fullscreen");
                     _rdpClient.DesktopWidth = Screen.FromControl(_frmMain).Bounds.Width;
                     _rdpClient.DesktopHeight = Screen.FromControl(_frmMain).Bounds.Height;
                 }
@@ -937,7 +1343,13 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 _rdpClient.OnLoginComplete += RDPEvent_OnLoginComplete;
                 _rdpClient.OnFatalError += RDPEvent_OnFatalError;
                 _rdpClient.OnDisconnected += RDPEvent_OnDisconnected;
+                _rdpClient.OnEnterFullScreenMode += RDPEvent_OnEnterFullscreenMode;
                 _rdpClient.OnLeaveFullScreenMode += RDPEvent_OnLeaveFullscreenMode;
+                _rdpClient.OnRequestGoFullScreen += RDPEvent_OnRequestGoFullscreen;
+                _rdpClient.OnRequestLeaveFullScreen += RDPEvent_OnRequestLeaveFullscreen;
+                _rdpClient.OnRemoteDesktopSizeChange += RDPEvent_OnRemoteDesktopSizeChange;
+                _rdpClient.OnAutoReconnecting += RDPEvent_OnAutoReconnecting;
+                _rdpClient.OnAutoReconnected += RDPEvent_OnAutoReconnected;
                 _rdpClient.OnIdleTimeoutNotification += RDPEvent_OnIdleTimeoutNotification;
             }
             catch (Exception ex)
@@ -1004,7 +1416,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private void RDPEvent_OnConnected()
         {
             Event_Connected(this);
-            ApplyFullscreenViewOnlyPolicy();
+            ApplyFullscreenViewOnlyPolicy("OnConnected");
             ScrollToLowerRightAsync();
         }
 
@@ -1012,16 +1424,71 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             loginComplete = true;
             _hasCompletedInitialConnect = true;
-            ApplyFullscreenViewOnlyPolicy();
+            ApplyFullscreenViewOnlyPolicy("OnLoginComplete");
             ScrollToLowerRightAsync();
             EndAutomaticReconnect();
         }
 
+        private void RDPEvent_OnEnterFullscreenMode()
+        {
+            MarkRdpFullscreenActive(true, "OnEnterFullScreenMode");
+            ApplyFullscreenViewOnlyPolicy("OnEnterFullScreenMode");
+            ScrollToLowerRightAsync();
+        }
+
         private void RDPEvent_OnLeaveFullscreenMode()
         {
-            Fullscreen = false;
-            SetViewOnly(false);
+            _fullscreenExitRequestedByMRemote = false;
+            MarkRdpFullscreenActive(false, "OnLeaveFullScreenMode");
+            SetViewOnly(false, "OnLeaveFullScreenMode");
+            ApplyFullscreenViewOnlyPolicy("OnLeaveFullScreenMode");
+            ScrollToLowerRightAsync();
             _leaveFullscreenEvent?.Invoke(this, new EventArgs());
+        }
+
+        private void RDPEvent_OnRequestGoFullscreen()
+        {
+            _fullscreenRequestedByMRemote = true;
+            MarkRdpFullscreenActive(true, "OnRequestGoFullScreen");
+            ApplyFullscreenViewOnlyPolicy("OnRequestGoFullScreen");
+            ScrollToLowerRightAsync();
+        }
+
+        private void RDPEvent_OnRequestLeaveFullscreen()
+        {
+            _fullscreenExitRequestedByMRemote = true;
+            MarkRdpFullscreenActive(false, "OnRequestLeaveFullScreen");
+            SetViewOnly(false, "OnRequestLeaveFullScreen");
+            ApplyFullscreenViewOnlyPolicy("OnRequestLeaveFullScreen");
+            ScrollToLowerRightAsync();
+        }
+
+        private void RDPEvent_OnRemoteDesktopSizeChange(int width, int height)
+        {
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP remote desktop size changed for host '{connectionInfo?.Hostname}': width={width}, height={height}");
+            ApplyRdpControlSizeForCurrentResolution();
+            ScrollToLowerRightAsync();
+        }
+
+        private void RDPEvent_OnAutoReconnecting(int disconnectReason, int attemptCount,
+            out AutoReconnectContinueState pArcContinueStatus)
+        {
+            pArcContinueStatus = AutoReconnectContinueState.autoReconnectContinueAutomatic;
+            BeginAutomaticReconnect();
+            ApplyFullscreenViewOnlyPolicy("OnAutoReconnecting");
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP ActiveX autoreconnecting for host '{connectionInfo?.Hostname}': " +
+                $"disconnectReason={disconnectReason}, attemptCount={attemptCount}");
+        }
+
+        private void RDPEvent_OnAutoReconnected()
+        {
+            ApplyFullscreenViewOnlyPolicy("OnAutoReconnected");
+            ScrollToLowerRightAsync();
+            EndAutomaticReconnect();
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP ActiveX autoreconnected for host '{connectionInfo?.Hostname}'");
         }
 
         private void RdpClient_GotFocus(object sender, EventArgs e)
@@ -1030,6 +1497,37 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 return;
 
             ((ConnectionTab)Control.Parent.Parent).Focus();
+        }
+
+        private void RdpClient_HandleCreated(object sender, EventArgs e)
+        {
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP control handle created for host '{connectionInfo?.Hostname}': handle={FormatHandle(Control?.Handle ?? IntPtr.Zero)}");
+            SetViewOnly(_viewOnly, "Control.HandleCreated");
+            ScrollToLowerRightAsync();
+        }
+
+        private void RdpClient_ParentChanged(object sender, EventArgs e)
+        {
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP control parent changed for host '{connectionInfo?.Hostname}': parent={Control?.Parent?.GetType().FullName}");
+            ApplyRdpControlSizeForCurrentResolution();
+            ScrollToLowerRightAsync();
+        }
+
+        private void RdpClient_Disposed(object sender, EventArgs e)
+        {
+            _fullscreenPollTimer?.Stop();
+            InputBlocker.SetBlocked(Control, false);
+
+            if (InterfaceControl != null)
+                InterfaceControl.Resize -= InterfaceControl_Resize;
+        }
+
+        private void InterfaceControl_Resize(object sender, EventArgs e)
+        {
+            ApplyRdpControlSizeForCurrentResolution();
+            ScrollToLowerRightAsync();
         }
         #endregion
 
@@ -1085,7 +1583,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 ReconnectGroup.DisposeReconnectGroup();
                 //SetProps()
                 BeginAutomaticReconnect();
-                ApplyFullscreenViewOnlyPolicy();
+                ApplyFullscreenViewOnlyPolicy("mRemoteNG timer reconnect");
                 _rdpClient.Connect();
             }
             catch (Exception ex)

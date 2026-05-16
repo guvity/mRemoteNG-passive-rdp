@@ -78,6 +78,15 @@ namespace mRemoteNG.Connection.Protocol.RDP
             if (!loginComplete)
                 return;
 
+            if (ShouldKeepRdpControlScrollable())
+            {
+                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                    $"Skipping RDP8 resize reconnect for host '{connectionInfo.Hostname}' because passive scroll/fixed-size mode is active");
+                ApplyRdpControlSizeForCurrentResolution();
+                ScrollToLowerRightAsync();
+                return;
+            }
+
             if (!InterfaceControl.Info.AutomaticResize)
                 return;
 
@@ -98,6 +107,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     : Control.Size;
                 BeginAutomaticReconnect();
                 RdpClient8.Reconnect((uint)size.Width, (uint)size.Height);
+                ApplyFullscreenViewOnlyPolicy("RDP8 ReconnectForResize");
                 ScrollToLowerRightAsync();
             }
             catch (Exception ex)
@@ -112,8 +122,11 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private bool DoResize()
         {
-            if (ShouldUseFixedResolutionControlSize())
+            if (ShouldKeepRdpControlScrollable())
+            {
+                ApplyRdpControlSizeForCurrentResolution();
                 return false;
+            }
 
             Control.Location = InterfaceControl.Location;
             // kmscode - this doesn't look right to me. But I'm not aware of any functionality issues with this currently...

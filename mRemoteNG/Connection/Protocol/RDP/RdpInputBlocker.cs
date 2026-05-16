@@ -43,18 +43,18 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private delegate bool EnumChildProc(IntPtr hWnd, IntPtr lParam);
 
-        public void SetBlocked(Control control, bool blocked)
+        public int SetBlocked(Control control, bool blocked)
         {
             if (control == null)
-                return;
+                return 0;
 
             if (blocked)
             {
-                Block(control);
+                return Block(control);
             }
             else
             {
-                Unblock(control);
+                return Unblock(control);
             }
         }
 
@@ -78,7 +78,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             return false;
         }
 
-        private void Block(Control control)
+        private int Block(Control control)
         {
             if (!_blockedControls.TryGetValue(control, out var blockedControl))
             {
@@ -94,21 +94,25 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
             blockedControl.RefreshSubclassedWindows();
             blockedControl.ScheduleRefreshRetries();
+            return blockedControl.SubclassedWindowCount;
         }
 
-        private void Unblock(Control control)
+        private int Unblock(Control control)
         {
             if (!_blockedControls.TryGetValue(control, out var blockedControl))
-                return;
+                return 0;
 
             control.HandleCreated -= BlockedControlOnHandleCreated;
             control.Disposed -= BlockedControlOnDisposed;
 
+            var subclassedWindowCount = blockedControl.SubclassedWindowCount;
             blockedControl.Dispose();
             _blockedControls.Remove(control);
 
             if (_blockedControls.Count == 0)
                 Application.RemoveMessageFilter(this);
+
+            return subclassedWindowCount;
         }
 
         private void BlockedControlOnHandleCreated(object sender, EventArgs e)
@@ -173,6 +177,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
             public Control Control { get; }
 
             public bool IsDisposed => Control == null || Control.IsDisposed;
+
+            public int SubclassedWindowCount => _subclassedWindows.Count;
 
             public void RefreshSubclassedWindows()
             {
