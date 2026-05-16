@@ -61,11 +61,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private System.Windows.Forms.Timer _fullscreenExitFinalizeTimer;
         private int _fullscreenExitFinalizeAttempts;
         private Control _rdpSafeFocusSink;
-        private bool _programmaticPassiveScrollCommit;
-        private System.Windows.Forms.Timer _passiveScrollCommitTimer;
-        private int _passiveScrollCommitAttempts;
-        private Point _lastCommittedPassiveScrollTarget;
-        private string _lastCommittedPassiveScrollSource;
 
         private const int FullscreenPollMaxAttempts = 10;
         private const int FullscreenPollIntervalMs = 200;
@@ -73,8 +68,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private const int FullscreenExitFinalizeMaxAttempts = 15;
         private const int ScrollRetryMaxAttempts = 10;
         private const int ScrollRetryIntervalMs = 200;
-        private const int PassiveScrollCommitIntervalMs = 150;
-        private const int PassiveScrollCommitMaxAttempts = 4;
         private const int FullscreenLeaveScrollDelayMs = 800;
         private const int SafeScrollViewportMultiplier = 5;
         private const int SafeScrollAbsoluteMaximum = 8192;
@@ -82,11 +75,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private const int WM_CANCELMODE = 0x001F;
         private const int WM_KILLFOCUS = 0x0008;
-        private const int WM_HSCROLL = 0x0114;
-        private const int WM_VSCROLL = 0x0115;
-        private const int SB_THUMBPOSITION = 4;
-        private const int SB_THUMBTRACK = 5;
-        private const int SB_ENDSCROLL = 8;
 
         [DllImport("user32.dll")]
         private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -107,11 +95,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         [DllImport("user32.dll")]
         private static extern IntPtr SetFocus(IntPtr hWnd);
-
-        private static IntPtr MakeWParam(int lowWord, int highWord)
-        {
-            return new IntPtr((highWord << 16) | (lowWord & 0xffff));
-        }
 
         #region Properties
 
@@ -913,7 +896,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private void ResetPassiveScrollLayout(string source)
         {
             StopScrollRetryTimer();
-            StopPassiveScrollCommitTimer();
 
             var scrollable = FindRdpScrollContainer();
             if (scrollable != null && !scrollable.IsDisposed)
@@ -1103,18 +1085,13 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
                 scrollable.AutoScrollPosition = new Point(targetX, targetY);
                 scrollable.PerformLayout();
-                CommitPassiveScrollPosition(scrollable, targetX, targetY, source);
-
                 var success = IsScrollAtTarget(scrollable, targetX, targetY);
 
                 Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                     BuildScrollDiagnostics(attempt, source, scrollable, surfaceSize, targetX, targetY, success));
 
                 if (success)
-                {
-                    StartPassiveScrollCommitTimer(new Point(targetX, targetY), source);
                     EnableViewOnlyAfterSuccessfulPassiveLayout(source, true);
-                }
 
                 return success;
             }
@@ -1125,156 +1102,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     ex, MessageClass.WarningMsg, false);
                 return true;
             }
-        }
-
-        private void CommitPassiveScrollPosition(ScrollableControl scrollable, int targetX, int targetY, string source)
-        {
-            if (Control == null || Control.IsDisposed || scrollable == null || scrollable.IsDisposed)
-                return;
-
-            if (_programmaticPassiveScrollCommit)
-                return;
-
-            try
-            {
-                _programmaticPassiveScrollCommit = true;
-
-                var viewport = GetRdpViewportSize(scrollable);
-                var maxTargetX = Math.Max(0, Control.Width - viewport.Width);
-                var maxTargetY = Math.Max(0, Control.Height - viewport.Height);
-
-                targetX = Math.Min(Math.Max(0, targetX), maxTargetX);
-                targetY = Math.Min(Math.Max(0, targetY), maxTargetY);
-
-                // Keep the passive surface invariant exact; do not add fake scroll pixels.
-                scrollable.AutoScroll = true;
-                scrollable.AutoScrollMinSize = Control.Size;
-                scrollable.PerformLayout();
-
-                SetScrollBarValueSafely(scrollable.HorizontalScroll, targetX);
-                SetScrollBarValueSafely(scrollable.VerticalScroll, targetY);
-
-                scrollable.AutoScrollPosition = new Point(targetX, targetY);
-                scrollable.PerformLayout();
-
-                SetScrollBarValueSafely(scrollable.HorizontalScroll, targetX);
-                SetScrollBarValueSafely(scrollable.VerticalScroll, targetY);
-
-                SendExactScrollbarThumbPosition(scrollable, targetX, targetY, source);
-
-                scrollable.AutoScrollPosition = new Point(targetX, targetY);
-                scrollable.PerformLayout();
-
-                var current = scrollable.AutoScrollPosition;
-
-                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                    $"RDP passive scroll position committed from {source} for host '{connectionInfo?.Hostname}': " +
-                    $"target={targetX},{targetY}, current={current}, HValue={scrollable.HorizontalScroll.Value}, " +
-                    $"VValue={scrollable.VerticalScroll.Value}, AutoScrollMinSize={FormatSize(scrollable.AutoScrollMinSize)}, " +
-                    $"Control.Size={FormatSize(Control.Size)}");
-            }
-            catch (Exception ex)
-            {
-                Runtime.MessageCollector.AddExceptionMessage(
-                    $"RDP passive scroll position commit failed from {source} for host '{connectionInfo?.Hostname}'",
-                    ex, MessageClass.WarningMsg, false);
-            }
-            finally
-            {
-                _programmaticPassiveScrollCommit = false;
-            }
-        }
-
-        private static void SetScrollBarValueSafely(ScrollProperties scroll, int requestedValue)
-        {
-            if (scroll == null || !scroll.Visible)
-                return;
-
-            try
-            {
-                var maxValue = Math.Max(scroll.Minimum, scroll.Maximum - scroll.LargeChange + 1);
-                var value = Math.Min(Math.Max(scroll.Minimum, requestedValue), maxValue);
-                scroll.Value = value;
-            }
-            catch
-            {
-            }
-        }
-
-        private void SendExactScrollbarThumbPosition(ScrollableControl scrollable, int targetX, int targetY, string source)
-        {
-            if (scrollable == null || scrollable.IsDisposed || !scrollable.IsHandleCreated)
-                return;
-
-            try
-            {
-                if (targetX > 0 && scrollable.HorizontalScroll.Visible)
-                {
-                    SendMessage(scrollable.Handle, WM_HSCROLL, MakeWParam(SB_THUMBTRACK, targetX), IntPtr.Zero);
-                    SendMessage(scrollable.Handle, WM_HSCROLL, MakeWParam(SB_THUMBPOSITION, targetX), IntPtr.Zero);
-                    SendMessage(scrollable.Handle, WM_HSCROLL, MakeWParam(SB_ENDSCROLL, 0), IntPtr.Zero);
-                }
-
-                if (targetY > 0 && scrollable.VerticalScroll.Visible)
-                {
-                    SendMessage(scrollable.Handle, WM_VSCROLL, MakeWParam(SB_THUMBTRACK, targetY), IntPtr.Zero);
-                    SendMessage(scrollable.Handle, WM_VSCROLL, MakeWParam(SB_THUMBPOSITION, targetY), IntPtr.Zero);
-                    SendMessage(scrollable.Handle, WM_VSCROLL, MakeWParam(SB_ENDSCROLL, 0), IntPtr.Zero);
-                }
-
-                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                    $"RDP exact scrollbar thumb position sent from {source} for host '{connectionInfo?.Hostname}': " +
-                    $"target={targetX},{targetY}");
-            }
-            catch (Exception ex)
-            {
-                Runtime.MessageCollector.AddExceptionMessage(
-                    $"RDP exact scrollbar thumb position failed from {source} for host '{connectionInfo?.Hostname}'",
-                    ex, MessageClass.WarningMsg, false);
-            }
-        }
-
-        private void StartPassiveScrollCommitTimer(Point target, string source)
-        {
-            _lastCommittedPassiveScrollTarget = target;
-            _lastCommittedPassiveScrollSource = source;
-            _passiveScrollCommitAttempts = 0;
-
-            if (_passiveScrollCommitTimer == null)
-            {
-                _passiveScrollCommitTimer = new System.Windows.Forms.Timer { Interval = PassiveScrollCommitIntervalMs };
-                _passiveScrollCommitTimer.Tick += PassiveScrollCommitTimerOnTick;
-            }
-
-            _passiveScrollCommitTimer.Stop();
-            _passiveScrollCommitTimer.Start();
-        }
-
-        private void PassiveScrollCommitTimerOnTick(object sender, EventArgs e)
-        {
-            _passiveScrollCommitAttempts++;
-
-            if (!ShouldAttemptPassiveScroll(_lastCommittedPassiveScrollSource))
-            {
-                StopPassiveScrollCommitTimer();
-                return;
-            }
-
-            var scrollable = FindRdpScrollContainer();
-            CommitPassiveScrollPosition(scrollable, _lastCommittedPassiveScrollTarget.X,
-                _lastCommittedPassiveScrollTarget.Y,
-                $"{_lastCommittedPassiveScrollSource} passive scroll commit attempt {_passiveScrollCommitAttempts}");
-
-            if (_passiveScrollCommitAttempts >= PassiveScrollCommitMaxAttempts)
-                StopPassiveScrollCommitTimer();
-        }
-
-        private void StopPassiveScrollCommitTimer()
-        {
-            _passiveScrollCommitTimer?.Stop();
-            _passiveScrollCommitAttempts = 0;
-            _lastCommittedPassiveScrollTarget = Point.Empty;
-            _lastCommittedPassiveScrollSource = null;
         }
 
         private ScrollableControl FindRdpScrollContainer()
@@ -2283,13 +2110,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
             _scrollRetryTimer?.Stop();
             _scrollRetryTimer?.Dispose();
             _scrollRetryTimer = null;
-            if (_passiveScrollCommitTimer != null)
-            {
-                _passiveScrollCommitTimer.Stop();
-                _passiveScrollCommitTimer.Tick -= PassiveScrollCommitTimerOnTick;
-                _passiveScrollCommitTimer.Dispose();
-                _passiveScrollCommitTimer = null;
-            }
             _fullscreenExitFinalizeTimer?.Stop();
             _fullscreenExitFinalizeTimer?.Dispose();
             _fullscreenExitFinalizeTimer = null;
