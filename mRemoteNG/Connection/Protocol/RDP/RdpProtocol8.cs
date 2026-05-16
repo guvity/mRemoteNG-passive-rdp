@@ -129,18 +129,13 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private bool DoResize()
         {
+            if (IsApplyingPassiveScrollLayout)
+                return false;
+
             if (IsLeavingFullscreenOrLayoutUnstable())
             {
                 Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                     $"Skipping RDP8 DoResize for host '{connectionInfo.Hostname}' while fullscreen layout is stabilizing");
-
-                if (Control != null && InterfaceControl != null && !InterfaceControl.ClientSize.IsEmpty)
-                {
-                    Control.Location = Point.Empty;
-                    if (Control.Size != InterfaceControl.ClientSize)
-                        Control.Size = InterfaceControl.ClientSize;
-                }
-
                 return false;
             }
 

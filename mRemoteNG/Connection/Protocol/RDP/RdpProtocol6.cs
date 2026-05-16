@@ -41,19 +41,19 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private static readonly PassiveRdpInputBlocker InputBlocker = new PassiveRdpInputBlocker();
         private bool _viewOnly;
         private bool _hasCompletedInitialConnect;
-        private bool _userDisabledViewOnlyInFullscreen;
+        private bool _userManuallyDisabledViewOnly;
+        private bool _autoEnableViewOnlyAfterSuccessfulScroll = true;
         private bool _automaticReconnectInProgress;
         private bool _suppressFocusOnAutomaticReconnect;
         private bool _isRdpFullscreenActive;
         private bool _fullscreenRequestedByMRemote;
         private bool _fullscreenExitRequestedByMRemote;
-        private Panel _scrollBottomRightTarget;
         private System.Windows.Forms.Timer _scrollRetryTimer;
         private int _scrollRetryAttempt;
         private string _scrollRetrySource;
         private System.Windows.Forms.Timer _fullscreenLeaveScrollTimer;
         private string _fullscreenLeaveScrollSource;
-        private Size _lastSafeRdpContentSize;
+        private bool _applyingPassiveScrollLayout;
         private DateTime _fullscreenLeftAtUtc = DateTime.MinValue;
         private System.Windows.Forms.Timer _fullscreenPollTimer;
         private int _fullscreenPollAttempts;
@@ -180,9 +180,11 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     Thread.Sleep(0);
                     Application.DoEvents();
                 }
-                Control.Anchor = AnchorStyles.None;
+                Control.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+                Control.Margin = Padding.Empty;
 
                 _rdpClient = (MsRdpClient6NotSafeForScripting)((AxHost)Control).GetOcx();
+                NormalizeRdpScrollOrigin(FindRdpScrollContainer(), "InitializeActiveXControl");
                 ScrollToLowerRightAsync("InitializeActiveXControl");
                 return true;
             }
@@ -271,16 +273,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             try
             {
-                if (!IsFullscreenEffective())
-                {
-                    _userDisabledViewOnlyInFullscreen = false;
-                    SetViewOnly(false, "ToggleViewOnly outside fullscreen");
-                    LogFullscreenState("ToggleViewOnly outside fullscreen", false);
-                    return;
-                }
-
                 var enabled = !ViewOnly;
-                _userDisabledViewOnlyInFullscreen = !enabled;
+                _userManuallyDisabledViewOnly = !enabled;
+                _autoEnableViewOnlyAfterSuccessfulScroll = enabled;
                 SetViewOnly(enabled, "ToggleViewOnly");
                 LogFullscreenState("ToggleViewOnly", enabled);
             }
@@ -346,24 +341,25 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void SetViewOnly(bool value, string source)
         {
-            if (Control != null && Control.IsHandleCreated && Control.InvokeRequired)
+            if (Control != null && !Control.IsDisposed && Control.IsHandleCreated && Control.InvokeRequired)
             {
                 Control.BeginInvoke(new Action(() => SetViewOnly(value, source)));
                 return;
             }
 
             var requested = value;
-            if (!IsFullscreenEffective())
-                value = false;
-
             var previous = _viewOnly;
-            _viewOnly = value;
-            var childHwndCount = InputBlocker.SetBlocked(Control, _viewOnly);
+            _viewOnly = requested;
+            var controlAvailable = Control != null && !Control.IsDisposed;
+            var childHwndCount = controlAvailable ? InputBlocker.SetBlocked(Control, _viewOnly) : 0;
 
             Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                 $"RDP input blocker {(_viewOnly ? "enabled" : "disabled")} from {source} for host '{connectionInfo?.Hostname}': " +
                 $"host={FormatControlName(Control)}, controlHandle={FormatHandle(Control?.Handle ?? IntPtr.Zero)}, " +
-                $"childHWndCount={childHwndCount}, requestedViewOnly={requested}, ViewOnly={_viewOnly}, previousViewOnly={previous}");
+                $"childHWndCount={childHwndCount}, requestedViewOnly={requested}, appliedViewOnly={_viewOnly}, " +
+                $"previousViewOnly={previous}, controlAvailable={controlAvailable}, fullscreenEffective={IsFullscreenEffective()}, " +
+                $"userManuallyDisabledViewOnly={_userManuallyDisabledViewOnly}, " +
+                $"autoEnableViewOnlyAfterSuccessfulScroll={_autoEnableViewOnlyAfterSuccessfulScroll}");
         }
 
         private void SetFullscreenState(bool target, string source, bool startPolling)
@@ -415,11 +411,12 @@ namespace mRemoteNG.Connection.Protocol.RDP
             if (active)
             {
                 _fullscreenExitRequestedByMRemote = false;
+                _userManuallyDisabledViewOnly = false;
+                _autoEnableViewOnlyAfterSuccessfulScroll = true;
             }
             else
             {
                 _fullscreenRequestedByMRemote = false;
-                _userDisabledViewOnlyInFullscreen = false;
                 _fullscreenExitRequestedByMRemote =
                     TryReadRdpClientFullscreen(out var rdpFullscreen) && rdpFullscreen;
                 if (wasFullscreen)
@@ -476,13 +473,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
             if (IsFullscreenEffective())
             {
-                if (!_userDisabledViewOnlyInFullscreen)
+                if (!_userManuallyDisabledViewOnly)
                     SetViewOnly(true, source);
-            }
-            else
-            {
-                _userDisabledViewOnlyInFullscreen = false;
-                SetViewOnly(false, source);
             }
 
             LogFullscreenState(source, null);
@@ -551,7 +543,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 $"rdpClientFullScreen={rdpFullscreen}, isRdpFullscreenActive={_isRdpFullscreenActive}, " +
                 $"fullscreenRequestedByMRemote={_fullscreenRequestedByMRemote}, fullscreenExitRequestedByMRemote={_fullscreenExitRequestedByMRemote}, " +
                 $"ViewOnly={_viewOnly}, " +
-                $"userDisabledViewOnlyInFullscreen={_userDisabledViewOnlyInFullscreen}");
+                $"userManuallyDisabledViewOnly={_userManuallyDisabledViewOnly}, " +
+                $"autoEnableViewOnlyAfterSuccessfulScroll={_autoEnableViewOnlyAfterSuccessfulScroll}");
         }
 
         protected void ScrollToLowerRightAsync()
@@ -628,6 +621,14 @@ namespace mRemoteNG.Connection.Protocol.RDP
             return ViewOnly || _automaticReconnectInProgress || _suppressFocusOnAutomaticReconnect;
         }
 
+        private void AllowAutoViewOnlyAfterPassiveScroll(string source)
+        {
+            _userManuallyDisabledViewOnly = false;
+            _autoEnableViewOnlyAfterSuccessfulScroll = true;
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP passive monitor auto ViewOnly armed from {source} for host '{connectionInfo?.Hostname}'");
+        }
+
         private bool ShouldAttemptPassiveScroll(string source)
         {
             if (Control == null || Control.IsDisposed || !Control.IsHandleCreated || _rdpClient == null)
@@ -679,6 +680,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
                    IsRdpClientFullscreenActiveSafe();
         }
 
+        protected bool IsApplyingPassiveScrollLayout => _applyingPassiveScrollLayout;
+
         private bool IsInFullscreenLeaveCooldown =>
             _fullscreenLeftAtUtc != DateTime.MinValue &&
             DateTime.UtcNow - _fullscreenLeftAtUtc < FullscreenLeaveCooldown;
@@ -696,7 +699,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void HandleFullscreenLeaveLayout(string source)
         {
-            SetViewOnly(false, source);
+            _userManuallyDisabledViewOnly = false;
+            _autoEnableViewOnlyAfterSuccessfulScroll = true;
+            SetViewOnly(false, $"{source} layout reset");
             ResetPassiveScrollLayout(source);
             ScheduleSafeScrollAfterFullscreenLeave(source);
         }
@@ -712,7 +717,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 {
                     scrollable.AutoScrollPosition = Point.Empty;
                     scrollable.AutoScrollMinSize = Size.Empty;
-                    RemoveScrollBottomRightTarget();
                     scrollable.PerformLayout();
                 }
                 catch (Exception ex)
@@ -725,18 +729,54 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
             if (Control != null && !Control.IsDisposed)
             {
-                Control.Location = Point.Empty;
-                var viewport = GetRdpViewportSize(scrollable);
-                if (!ShouldUseFixedResolutionControlSize() && IsPositiveSize(viewport) && Control.Size != viewport)
-                    Control.Size = viewport;
+                NormalizeRdpScrollOrigin(scrollable, source);
             }
-
-            _lastSafeRdpContentSize = Size.Empty;
 
             Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                 $"RDP passive scroll layout reset from {source} for host '{connectionInfo?.Hostname}': " +
                 $"viewport={FormatSize(GetRdpViewportSize(scrollable))}, Control.Location={FormatPoint(Control?.Location ?? Point.Empty)}, " +
                 $"Control.Size={FormatSize(Control?.Size ?? Size.Empty)}, AutoScrollMinSize={FormatSize(scrollable?.AutoScrollMinSize ?? Size.Empty)}");
+        }
+
+        private void NormalizeRdpScrollOrigin(ScrollableControl scrollable, string source)
+        {
+            StopScrollRetryTimer();
+
+            if (Control == null || Control.IsDisposed)
+                return;
+
+            try
+            {
+                if (scrollable != null && !scrollable.IsDisposed)
+                {
+                    scrollable.AutoScrollPosition = Point.Empty;
+                    scrollable.PerformLayout();
+                }
+
+                Control.Location = Point.Empty;
+                Control.Margin = Padding.Empty;
+                Control.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+
+                if (scrollable != null && !scrollable.IsDisposed)
+                {
+                    scrollable.AutoScrollMinSize =
+                        IsSmartSizeEnabledSafe() || InterfaceControl?.Info?.Resolution == RDPResolutions.SmartSize
+                            ? Size.Empty
+                            : Control.Size;
+                    scrollable.PerformLayout();
+                }
+
+                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                    $"RDP passive scroll origin normalized from {source} for host '{connectionInfo?.Hostname}': " +
+                    $"Control.Location={FormatPoint(Control.Location)}, Control.Bounds={FormatRectangle(Control.Bounds)}, " +
+                    $"Control.Size={FormatSize(Control.Size)}, AutoScrollMinSize={FormatSize(scrollable?.AutoScrollMinSize ?? Size.Empty)}");
+            }
+            catch (Exception ex)
+            {
+                Runtime.MessageCollector.AddExceptionMessage(
+                    $"RDP passive scroll origin normalization failed for host '{connectionInfo?.Hostname}' from {source}",
+                    ex, MessageClass.WarningMsg, false);
+            }
         }
 
         private void ScheduleSafeScrollAfterFullscreenLeave(string source)
@@ -777,6 +817,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void StartScrollToLowerRightRetries(string source)
         {
+            if (!ShouldAttemptPassiveScroll(source))
+                return;
+
+            NormalizeRdpScrollOrigin(FindRdpScrollContainer(), source);
             if (!ShouldAttemptPassiveScroll(source))
                 return;
 
@@ -825,44 +869,44 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     return true;
                 }
 
-                ApplyRdpControlSizeForCurrentResolution(source);
-
                 scrollable.AutoScroll = true;
-                var contentSize = GetSafeRdpContentSize(scrollable, source);
+                var surfaceSize = DetermineSafeRdpSurfaceSize(scrollable, source);
                 var viewport = GetRdpViewportSize(scrollable);
 
-                if (!HasScrollableArea(contentSize, viewport))
+                if (!IsPositiveSize(surfaceSize))
                 {
-                    scrollable.AutoScrollMinSize = Size.Empty;
-                    RemoveScrollBottomRightTarget();
-                    Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                        $"RDP passive scroll skipped from {source} for host '{connectionInfo?.Hostname}': " +
-                        $"contentSize={FormatSize(contentSize)}, viewport={FormatSize(viewport)}, reason={GetNoScrollReason(scrollable, contentSize, IsSmartSizeEnabledSafe())}");
+                    ApplyUnsafePassiveScrollFallback(scrollable, viewport, source);
                     return true;
                 }
 
-                scrollable.AutoScrollMinSize = contentSize;
-                var dummyTarget = EnsureScrollBottomRightTarget(scrollable, contentSize);
-                scrollable.PerformLayout();
+                ApplyPassiveScrollSurface(scrollable, surfaceSize, source);
 
-                var targetX = Math.Max(0, contentSize.Width - viewport.Width);
-                var targetY = Math.Max(0, contentSize.Height - viewport.Height);
-                ClampScrollTarget(contentSize, viewport, ref targetX, ref targetY, source);
+                if (!ValidatePassiveScrollInvariant(scrollable, surfaceSize, viewport, source))
+                    return true;
 
-                var scrollControlIntoViewCalled = dummyTarget != null;
-                if (dummyTarget != null)
-                    scrollable.ScrollControlIntoView(dummyTarget);
+                var targetX = Math.Max(0, Control.Width - viewport.Width);
+                var targetY = Math.Max(0, Control.Height - viewport.Height);
+
+                if (targetX == 0 && targetY == 0)
+                {
+                    scrollable.PerformLayout();
+                    Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                        BuildScrollDiagnostics(attempt, source, scrollable, surfaceSize, targetX, targetY, true));
+                    EnableViewOnlyAfterSuccessfulPassiveLayout(source, false);
+                    return true;
+                }
 
                 scrollable.AutoScrollPosition = new Point(targetX, targetY);
-                EnsureScrollPositionWithinSafeBounds(scrollable, contentSize, viewport, targetX, targetY, source);
-                var win32ScrollFallbackCalled = SendScrollbarBottomRight(scrollable, targetX, targetY);
+                scrollable.PerformLayout();
+                var success = IsScrollAtTarget(scrollable, targetX, targetY);
 
                 Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                    BuildScrollDiagnostics(attempt, source, scrollable, contentSize, targetX, targetY,
-                        scrollControlIntoViewCalled, win32ScrollFallbackCalled));
+                    BuildScrollDiagnostics(attempt, source, scrollable, surfaceSize, targetX, targetY, success));
 
-                return Math.Abs(scrollable.AutoScrollPosition.X) >= targetX &&
-                       Math.Abs(scrollable.AutoScrollPosition.Y) >= targetY;
+                if (success)
+                    EnableViewOnlyAfterSuccessfulPassiveLayout(source, true);
+
+                return success;
             }
             catch (Exception ex)
             {
@@ -915,23 +959,15 @@ namespace mRemoteNG.Connection.Protocol.RDP
             }
 
             var scrollable = FindRdpScrollContainer();
-            var targetSize = GetSafeRdpContentSize(scrollable, source);
+            var targetSize = DetermineSafeRdpSurfaceSize(scrollable, source);
             var viewport = GetRdpViewportSize(scrollable);
             if (!IsPositiveSize(targetSize))
-                return;
-
-            if (Control.Location != Point.Empty)
-                Control.Location = Point.Empty;
-
-            if (!ShouldUseFixedResolutionControlSize() && SameSize(targetSize, viewport))
             {
-                if (IsPositiveSize(viewport) && Control.Size != viewport)
-                    Control.Size = viewport;
+                ApplyUnsafePassiveScrollFallback(scrollable, viewport, source);
                 return;
             }
 
-            if (Control.Size != targetSize)
-                Control.Size = targetSize;
+            ApplyPassiveScrollSurface(scrollable, targetSize, source);
         }
 
         protected bool ShouldKeepRdpControlScrollable()
@@ -961,17 +997,12 @@ namespace mRemoteNG.Connection.Protocol.RDP
                    InterfaceControl.Info.Resolution == RDPResolutions.Fullscreen;
         }
 
-        private Size GetRdpScrollContentSize(ScrollableControl scrollable)
-        {
-            return GetSafeRdpContentSize(scrollable, "GetRdpScrollContentSize");
-        }
-
-        private Size GetSafeRdpContentSize(ScrollableControl scrollable, string source)
+        private Size DetermineSafeRdpSurfaceSize(ScrollableControl scrollable, string source)
         {
             var viewport = GetRdpViewportSize(scrollable);
             var rdpDesktop = GetRdpDesktopSize();
             var configured = GetConfiguredResolutionSize();
-            var candidate = MaxSize(rdpDesktop, configured);
+            Size candidate;
 
             if (!IsPositiveSize(viewport))
             {
@@ -980,39 +1011,34 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 return Size.Empty;
             }
 
-            if (!IsPositiveSize(candidate))
+            if (IsPositiveSize(rdpDesktop))
+            {
+                candidate = rdpDesktop;
+            }
+            else if (IsPositiveSize(configured))
+            {
+                candidate = configured;
+            }
+            else
             {
                 LogNoRealScrollableDesktop(source, viewport, rdpDesktop, configured);
                 return viewport;
             }
 
-            if (candidate.Width <= viewport.Width && candidate.Height <= viewport.Height)
-            {
-                LogNoRealScrollableDesktop(source, viewport, rdpDesktop, configured);
-                return viewport;
-            }
-
-            candidate = MaxSize(candidate, viewport);
-            if (!IsSafeContentSizeForViewport(candidate, viewport))
+            if (IsSuspiciousRdpSurfaceSize(candidate, viewport))
             {
                 Runtime.MessageCollector.AddMessage(MessageClass.WarningMsg,
-                    $"RDP passive scroll skipped because content size is suspicious for host '{connectionInfo?.Hostname}' from {source}: " +
+                    $"RDP passive scroll skipped because surface size is suspicious for host '{connectionInfo?.Hostname}' from {source}: " +
                     $"candidate={FormatSize(candidate)}, viewport={FormatSize(viewport)}, rdpDesktop={FormatSize(rdpDesktop)}, " +
                     $"configured={FormatSize(configured)}, cap={FormatSize(GetSafeContentSizeCap(viewport))}");
-
-                var lastSafe = GetLastSafeRdpContentSize(viewport);
-                if (IsPositiveSize(lastSafe))
-                {
-                    Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                        $"RDP passive scroll using last validated content size for host '{connectionInfo?.Hostname}' from {source}: " +
-                        $"lastSafe={FormatSize(lastSafe)}, viewport={FormatSize(viewport)}");
-                    return lastSafe;
-                }
-
-                return viewport;
+                return Size.Empty;
             }
 
-            _lastSafeRdpContentSize = candidate;
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP passive scroll surface determined from {source} for host '{connectionInfo?.Hostname}': " +
+                $"candidate={FormatSize(candidate)}, viewport={FormatSize(viewport)}, rdpDesktop={FormatSize(rdpDesktop)}, " +
+                $"configured={FormatSize(configured)}, fixedResolution={ShouldUseFixedResolutionControlSize()}");
+
             return candidate;
         }
 
@@ -1049,22 +1075,16 @@ namespace mRemoteNG.Connection.Protocol.RDP
             return InterfaceControl?.ClientSize ?? Size.Empty;
         }
 
-        private bool IsSafeContentSizeForViewport(Size candidate, Size viewport)
+        private bool IsSuspiciousRdpSurfaceSize(Size candidate, Size viewport)
         {
             if (!IsPositiveSize(candidate) || !IsPositiveSize(viewport))
-                return false;
+                return true;
+
+            if (candidate.Width < 100 || candidate.Height < 100)
+                return true;
 
             var cap = GetSafeContentSizeCap(viewport);
-            return candidate.Width <= cap.Width && candidate.Height <= cap.Height;
-        }
-
-        private Size GetLastSafeRdpContentSize(Size viewport)
-        {
-            if (!HasScrollableArea(_lastSafeRdpContentSize, viewport))
-                return Size.Empty;
-
-            var candidate = MaxSize(_lastSafeRdpContentSize, viewport);
-            return IsSafeContentSizeForViewport(candidate, viewport) ? candidate : Size.Empty;
+            return candidate.Width > cap.Width || candidate.Height > cap.Height;
         }
 
         private Size GetSafeContentSizeCap(Size viewport)
@@ -1087,11 +1107,115 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 $"viewport={FormatSize(viewport)}, rdpDesktop={FormatSize(rdpDesktop)}, configured={FormatSize(configured)}");
         }
 
-        private static bool HasScrollableArea(Size contentSize, Size viewport)
+        private void ApplyPassiveScrollSurface(ScrollableControl scrollable, Size surfaceSize, string source)
         {
-            return IsPositiveSize(contentSize) &&
-                   IsPositiveSize(viewport) &&
-                   (contentSize.Width > viewport.Width || contentSize.Height > viewport.Height);
+            if (Control == null || Control.IsDisposed || scrollable == null || scrollable.IsDisposed)
+                return;
+
+            try
+            {
+                _applyingPassiveScrollLayout = true;
+                Control.Location = Point.Empty;
+                Control.Margin = Padding.Empty;
+                Control.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+
+                if (Control.Size != surfaceSize)
+                    Control.Size = surfaceSize;
+
+                scrollable.AutoScroll = true;
+                scrollable.AutoScrollMinSize = Control.Size;
+                scrollable.PerformLayout();
+            }
+            finally
+            {
+                _applyingPassiveScrollLayout = false;
+            }
+
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP passive scroll surface applied from {source} for host '{connectionInfo?.Hostname}': " +
+                $"Control.Location={FormatPoint(Control.Location)}, Control.Size={FormatSize(Control.Size)}, " +
+                $"AutoScrollMinSize={FormatSize(scrollable.AutoScrollMinSize)}");
+        }
+
+        private void ApplyUnsafePassiveScrollFallback(ScrollableControl scrollable, Size viewport, string source)
+        {
+            if (Control == null || Control.IsDisposed)
+                return;
+
+            try
+            {
+                _applyingPassiveScrollLayout = true;
+                Control.Location = Point.Empty;
+                Control.Margin = Padding.Empty;
+                Control.Anchor = AnchorStyles.Top | AnchorStyles.Left;
+
+                if (IsPositiveSize(viewport) && Control.Size != viewport)
+                    Control.Size = viewport;
+
+                if (scrollable != null && !scrollable.IsDisposed)
+                {
+                    scrollable.AutoScrollMinSize = Size.Empty;
+                    scrollable.PerformLayout();
+                }
+            }
+            finally
+            {
+                _applyingPassiveScrollLayout = false;
+            }
+        }
+
+        private bool ValidatePassiveScrollInvariant(ScrollableControl scrollable, Size surfaceSize, Size viewport, string source)
+        {
+            var autoScrollMatchesControl = Control != null && SameSize(scrollable.AutoScrollMinSize, Control.Size);
+            var controlMatchesSurface = Control != null && SameSize(Control.Size, surfaceSize);
+            var originIsZero = Control != null && Control.Location == Point.Empty;
+            var targetX = Control == null ? 0 : Math.Max(0, Control.Width - viewport.Width);
+            var targetY = Control == null ? 0 : Math.Max(0, Control.Height - viewport.Height);
+            var targetWithinSurface = Control != null &&
+                                      targetX <= Math.Max(0, Control.Width - viewport.Width) &&
+                                      targetY <= Math.Max(0, Control.Height - viewport.Height);
+
+            if (autoScrollMatchesControl && controlMatchesSurface && originIsZero && targetWithinSurface)
+                return true;
+
+            Runtime.MessageCollector.AddMessage(MessageClass.WarningMsg,
+                $"RDP passive scroll invariant failed for host '{connectionInfo?.Hostname}' from {source}: " +
+                $"AutoScrollMinSize={FormatSize(scrollable.AutoScrollMinSize)}, Control.Location={FormatPoint(Control?.Location ?? Point.Empty)}, " +
+                $"Control.Bounds={FormatRectangle(Control?.Bounds ?? Rectangle.Empty)}, Control.Size={FormatSize(Control?.Size ?? Size.Empty)}, " +
+                $"surfaceSize={FormatSize(surfaceSize)}, viewport={FormatSize(viewport)}, target={targetX},{targetY}, " +
+                $"autoScrollMatchesControl={autoScrollMatchesControl}, controlMatchesSurface={controlMatchesSurface}, " +
+                $"originIsZero={originIsZero}, targetWithinSurface={targetWithinSurface}");
+            return false;
+        }
+
+        private static bool IsScrollAtTarget(ScrollableControl scrollable, int targetX, int targetY)
+        {
+            const int tolerance = 5;
+            var final = scrollable.AutoScrollPosition;
+            return Math.Abs(Math.Abs(final.X) - targetX) <= tolerance &&
+                   Math.Abs(Math.Abs(final.Y) - targetY) <= tolerance;
+        }
+
+        private void EnableViewOnlyAfterSuccessfulPassiveLayout(string source, bool scrollNeeded)
+        {
+            if (_userManuallyDisabledViewOnly || !_autoEnableViewOnlyAfterSuccessfulScroll)
+            {
+                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                    $"RDP passive scroll completed from {source} for host '{connectionInfo?.Hostname}' without auto ViewOnly: " +
+                    $"userManuallyDisabledViewOnly={_userManuallyDisabledViewOnly}, " +
+                    $"autoEnableViewOnlyAfterSuccessfulScroll={_autoEnableViewOnlyAfterSuccessfulScroll}");
+                return;
+            }
+
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                scrollNeeded
+                    ? $"RDP passive scroll completed; enabling ViewOnly for host '{connectionInfo?.Hostname}' from {source}"
+                    : $"RDP passive scroll not needed; enabling ViewOnly for stable passive monitor layout for host '{connectionInfo?.Hostname}' from {source}");
+
+            SetViewOnly(true, scrollNeeded
+                ? "after successful passive scroll"
+                : "after successful passive scroll/stable layout");
+            _autoEnableViewOnlyAfterSuccessfulScroll = false;
         }
 
         private static bool IsPositiveSize(Size size)
@@ -1104,131 +1228,35 @@ namespace mRemoteNG.Connection.Protocol.RDP
             return first.Width == second.Width && first.Height == second.Height;
         }
 
-        private void ClampScrollTarget(Size contentSize, Size viewport, ref int targetX, ref int targetY, string source)
-        {
-            var originalX = targetX;
-            var originalY = targetY;
-            var maxAllowedTargetX = Math.Max(0, contentSize.Width - viewport.Width);
-            var maxAllowedTargetY = Math.Max(0, contentSize.Height - viewport.Height);
-            targetX = Math.Min(Math.Max(0, targetX), maxAllowedTargetX);
-            targetY = Math.Min(Math.Max(0, targetY), maxAllowedTargetY);
-
-            if (targetX != originalX || targetY != originalY)
-            {
-                Runtime.MessageCollector.AddMessage(MessageClass.WarningMsg,
-                    $"RDP passive scroll target clamped for host '{connectionInfo?.Hostname}' from {source}: " +
-                    $"original={originalX},{originalY}, clamped={targetX},{targetY}, contentSize={FormatSize(contentSize)}, viewport={FormatSize(viewport)}");
-            }
-        }
-
-        private void EnsureScrollPositionWithinSafeBounds(ScrollableControl scrollable, Size contentSize, Size viewport,
-            int targetX, int targetY, string source)
-        {
-            var current = scrollable.AutoScrollPosition;
-            var currentX = Math.Abs(current.X);
-            var currentY = Math.Abs(current.Y);
-            var maxAllowedTargetX = Math.Max(0, contentSize.Width - viewport.Width);
-            var maxAllowedTargetY = Math.Max(0, contentSize.Height - viewport.Height);
-            const int margin = 4;
-
-            if (currentX <= maxAllowedTargetX + margin && currentY <= maxAllowedTargetY + margin)
-                return;
-
-            Runtime.MessageCollector.AddMessage(MessageClass.WarningMsg,
-                $"RDP passive scroll position reset for host '{connectionInfo?.Hostname}' from {source}: " +
-                $"current={currentX},{currentY}, target={targetX},{targetY}, maxAllowed={maxAllowedTargetX},{maxAllowedTargetY}, " +
-                $"contentSize={FormatSize(contentSize)}, viewport={FormatSize(viewport)}");
-
-            scrollable.AutoScrollPosition = new Point(
-                Math.Min(targetX, maxAllowedTargetX),
-                Math.Min(targetY, maxAllowedTargetY));
-            scrollable.AutoScrollMinSize = contentSize;
-            scrollable.PerformLayout();
-        }
-
-        private void RemoveScrollBottomRightTarget()
-        {
-            if (_scrollBottomRightTarget == null)
-                return;
-
-            try
-            {
-                if (!_scrollBottomRightTarget.IsDisposed)
-                {
-                    if (_scrollBottomRightTarget.Parent != null)
-                        _scrollBottomRightTarget.Parent.Controls.Remove(_scrollBottomRightTarget);
-
-                    _scrollBottomRightTarget.Dispose();
-                }
-            }
-            catch
-            {
-            }
-
-            _scrollBottomRightTarget = null;
-        }
-
-        private Panel EnsureScrollBottomRightTarget(ScrollableControl scrollable, Size contentSize)
-        {
-            if (scrollable == null || scrollable.IsDisposed)
-                return null;
-
-            if (_scrollBottomRightTarget == null || _scrollBottomRightTarget.IsDisposed)
-            {
-                _scrollBottomRightTarget = new Panel
-                {
-                    Name = "PassiveRdpScrollBottomRightTarget",
-                    Size = new Size(1, 1),
-                    Enabled = false,
-                    TabStop = false,
-                    BackColor = scrollable.BackColor,
-                    Visible = true
-                };
-            }
-
-            if (_scrollBottomRightTarget.Parent != scrollable)
-                scrollable.Controls.Add(_scrollBottomRightTarget);
-
-            _scrollBottomRightTarget.Location = new Point(
-                Math.Max(0, contentSize.Width - _scrollBottomRightTarget.Width),
-                Math.Max(0, contentSize.Height - _scrollBottomRightTarget.Height));
-            _scrollBottomRightTarget.SendToBack();
-            return _scrollBottomRightTarget;
-        }
-
-        private bool SendScrollbarBottomRight(ScrollableControl scrollable, int targetX, int targetY)
-        {
-            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                $"Win32ScrollFallback disabled for safety for host '{connectionInfo?.Hostname}': targetX={targetX}, targetY={targetY}");
-            return false;
-        }
-
         private string BuildScrollDiagnostics(int attempt, string source, ScrollableControl scrollable, Size contentSize,
-            int targetX, int targetY, bool scrollControlIntoViewCalled, bool win32ScrollFallbackCalled)
+            int targetX, int targetY, bool success)
         {
             var horizontalScroll = scrollable.HorizontalScroll;
             var verticalScroll = scrollable.VerticalScroll;
             var desktopSize = GetRdpDesktopSize();
             var smartSize = IsSmartSizeEnabledSafe();
             var noScrollReason = GetNoScrollReason(scrollable, contentSize, smartSize);
+            var invariant = Control != null &&
+                            Control.Location == Point.Empty &&
+                            SameSize(Control.Size, contentSize) &&
+                            SameSize(scrollable.AutoScrollMinSize, Control.Size);
 
             return "RDP scroll lower-right attempt " + attempt +
                    $" from {source}" +
                    $" for host '{connectionInfo?.Hostname}': container={scrollable.Name}/{scrollable.GetType().FullName}, " +
                    $"InterfaceControl.ClientSize={FormatSize(InterfaceControl?.ClientSize ?? Size.Empty)}, " +
                    $"AutoScroll={scrollable.AutoScroll}, AutoScrollMinSize={FormatSize(scrollable.AutoScrollMinSize)}, " +
-                   $"DisplayRectangle={FormatRectangle(scrollable.DisplayRectangle)}, contentSize={FormatSize(contentSize)}, " +
+                   $"DisplayRectangle={FormatRectangle(scrollable.DisplayRectangle)}, surfaceSize={FormatSize(contentSize)}, " +
                    $"Control.Location={FormatPoint(Control?.Location ?? Point.Empty)}, Control.Size={FormatSize(Control?.Size ?? Size.Empty)}, " +
+                   $"Control.Bounds={FormatRectangle(Control?.Bounds ?? Rectangle.Empty)}, Control.Right={Control?.Right ?? 0}, Control.Bottom={Control?.Bottom ?? 0}, " +
                    $"Control.ClientSize={FormatSize(Control?.ClientSize ?? Size.Empty)}, RdpDesktop={FormatSize(desktopSize)}, " +
-                   $"lastSafe={FormatSize(_lastSafeRdpContentSize)}, safetyCap={FormatSize(GetSafeContentSizeCap(scrollable.ClientSize))}, " +
+                   $"safetyCap={FormatSize(GetSafeContentSizeCap(scrollable.ClientSize))}, invariant={invariant}, " +
                    $"Info.Resolution={InterfaceControl?.Info?.Resolution}, SmartSize={smartSize}, " +
                    $"Fullscreen={Fullscreen}, EffectiveFullscreen={IsFullscreenEffective()}, AutomaticResize={InterfaceControl?.Info?.AutomaticResize}, " +
                    $"HVisible={horizontalScroll.Visible}, HMax={horizontalScroll.Maximum}, HLarge={horizontalScroll.LargeChange}, HValue={horizontalScroll.Value}, " +
                    $"VVisible={verticalScroll.Visible}, VMax={verticalScroll.Maximum}, VLarge={verticalScroll.LargeChange}, VValue={verticalScroll.Value}, " +
-                   $"targetX={targetX}, targetY={targetY}, dummyExists={_scrollBottomRightTarget != null && !_scrollBottomRightTarget.IsDisposed}, " +
-                   $"dummyLocation={FormatPoint(_scrollBottomRightTarget?.Location ?? Point.Empty)}, " +
-                   $"ScrollControlIntoView={scrollControlIntoViewCalled}, Win32ScrollFallback={win32ScrollFallbackCalled}, " +
-                   $"PassiveScrollMode={ShouldUsePassiveScrollMode()}, noScrollReason={noScrollReason}, final={scrollable.AutoScrollPosition}";
+                   $"targetX={targetX}, targetY={targetY}, PassiveScrollMode={ShouldUsePassiveScrollMode()}, " +
+                   $"noScrollReason={noScrollReason}, final={scrollable.AutoScrollPosition}, success={success}";
         }
 
         private string GetNoScrollReason(ScrollableControl scrollable, Size contentSize, bool smartSize)
@@ -1255,11 +1283,6 @@ namespace mRemoteNG.Connection.Protocol.RDP
             {
                 return false;
             }
-        }
-
-        private static Size MaxSize(Size first, Size second)
-        {
-            return new Size(Math.Max(first.Width, second.Width), Math.Max(first.Height, second.Height));
         }
 
         private static string FormatSize(Size size)
@@ -1784,6 +1807,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private void RDPEvent_OnConnected()
         {
             Event_Connected(this);
+            AllowAutoViewOnlyAfterPassiveScroll("OnConnected");
             ApplyFullscreenViewOnlyPolicy("OnConnected");
             ScrollToLowerRightAsync("OnConnected");
         }
@@ -1792,6 +1816,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             loginComplete = true;
             _hasCompletedInitialConnect = true;
+            AllowAutoViewOnlyAfterPassiveScroll("OnLoginComplete");
             ApplyFullscreenViewOnlyPolicy("OnLoginComplete");
             ScrollToLowerRightAsync("OnLoginComplete");
             EndAutomaticReconnect();
@@ -1833,6 +1858,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                 $"RDP remote desktop size changed for host '{connectionInfo?.Hostname}': width={width}, height={height}");
+            NormalizeRdpScrollOrigin(FindRdpScrollContainer(), "OnRemoteDesktopSizeChange");
             ApplyRdpControlSizeForCurrentResolution("OnRemoteDesktopSizeChange");
             ScrollToLowerRightAsync("OnRemoteDesktopSizeChange");
         }
@@ -1850,6 +1876,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void RDPEvent_OnAutoReconnected()
         {
+            AllowAutoViewOnlyAfterPassiveScroll("OnAutoReconnected");
             ApplyFullscreenViewOnlyPolicy("OnAutoReconnected");
             ScrollToLowerRightAsync("OnAutoReconnected");
             EndAutomaticReconnect();
@@ -1870,6 +1897,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                 $"RDP control handle created for host '{connectionInfo?.Hostname}': handle={FormatHandle(Control?.Handle ?? IntPtr.Zero)}");
             SetViewOnly(_viewOnly, "Control.HandleCreated");
+            NormalizeRdpScrollOrigin(FindRdpScrollContainer(), "Control.HandleCreated");
             ScrollToLowerRightAsync("Control.HandleCreated");
         }
 
@@ -1877,6 +1905,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                 $"RDP control parent changed for host '{connectionInfo?.Hostname}': parent={Control?.Parent?.GetType().FullName}");
+            NormalizeRdpScrollOrigin(FindRdpScrollContainer(), "Control.ParentChanged");
             ApplyRdpControlSizeForCurrentResolution("Control.ParentChanged");
             ScrollToLowerRightAsync("Control.ParentChanged");
         }
@@ -1892,7 +1921,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
             _scrollRetryTimer?.Stop();
             _scrollRetryTimer?.Dispose();
             _scrollRetryTimer = null;
-            RemoveScrollBottomRightTarget();
+            _viewOnly = false;
+            _userManuallyDisabledViewOnly = false;
+            _autoEnableViewOnlyAfterSuccessfulScroll = false;
             InputBlocker.SetBlocked(Control, false);
 
             if (InterfaceControl != null)
