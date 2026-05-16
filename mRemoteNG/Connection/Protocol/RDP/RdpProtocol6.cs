@@ -37,6 +37,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private readonly FrmMain _frmMain = FrmMain.Default;
         protected virtual RdpVersion RdpProtocolVersion => RdpVersion.Rdc6;
         private AxHost AxHost => (AxHost)Control;
+        private static readonly PassiveRdpInputBlocker InputBlocker = new PassiveRdpInputBlocker();
+        private bool _viewOnly;
+        private bool _userDisabledViewOnlyInFullscreen;
+        private bool _automaticReconnectInProgress;
 
         #region Properties
 
@@ -49,7 +53,11 @@ namespace mRemoteNG.Connection.Protocol.RDP
         public virtual bool Fullscreen
         {
             get => _rdpClient.FullScreen;
-            protected set => _rdpClient.FullScreen = value;
+            protected set
+            {
+                _rdpClient.FullScreen = value;
+                ApplyFullscreenViewOnlyPolicy();
+            }
         }
 
         private bool RedirectKeys
@@ -85,8 +93,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         public bool ViewOnly
         {
-            get => !AxHost.Enabled;
-            set => AxHost.Enabled = !value;
+            get => _viewOnly;
+            set => SetViewOnly(value);
         }
 
         #endregion
@@ -167,6 +175,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
         public override bool Connect()
         {
             loginComplete = false;
+            _automaticReconnectInProgress = false;
             SetEventHandlers();
 
             try
@@ -229,7 +238,16 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             try
             {
-                ViewOnly = !ViewOnly;
+                if (!Fullscreen)
+                {
+                    _userDisabledViewOnlyInFullscreen = false;
+                    SetViewOnly(false);
+                    return;
+                }
+
+                var enabled = !ViewOnly;
+                _userDisabledViewOnlyInFullscreen = !enabled;
+                SetViewOnly(enabled);
             }
             catch
             {
@@ -241,6 +259,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             try
             {
+                if (ViewOnly || _automaticReconnectInProgress)
+                    return;
+
                 if (Control.ContainsFocus == false)
                 {
                     Control.Focus();
@@ -276,6 +297,85 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         #region Private Methods
 
+
+        private void SetViewOnly(bool value)
+        {
+            if (!Fullscreen)
+                value = false;
+
+            _viewOnly = value;
+            InputBlocker.SetBlocked(Control, _viewOnly);
+        }
+
+        private void ApplyFullscreenViewOnlyPolicy()
+        {
+            if (Control == null || _rdpClient == null)
+                return;
+
+            if (Fullscreen)
+            {
+                if (!_userDisabledViewOnlyInFullscreen)
+                    SetViewOnly(true);
+            }
+            else
+            {
+                _userDisabledViewOnlyInFullscreen = false;
+                SetViewOnly(false);
+            }
+
+            ScrollToLowerRightAsync();
+        }
+
+        protected void ScrollToLowerRightAsync()
+        {
+            try
+            {
+                if (Control == null || Control.IsDisposed || !Control.IsHandleCreated)
+                    return;
+
+                Control.BeginInvoke(new Action(() =>
+                {
+                    ScrollToLowerRight();
+
+                    var timer = new System.Windows.Forms.Timer { Interval = 300 };
+                    timer.Tick += (sender, args) =>
+                    {
+                        timer.Stop();
+                        timer.Dispose();
+                        ScrollToLowerRight();
+                    };
+                    timer.Start();
+                }));
+            }
+            catch
+            {
+            }
+        }
+
+        private void ScrollToLowerRight()
+        {
+            try
+            {
+                var parent = Control?.Parent;
+                while (parent != null)
+                {
+                    var scrollable = parent as ScrollableControl;
+                    if (scrollable != null)
+                    {
+                        scrollable.AutoScrollPosition = new System.Drawing.Point(
+                            scrollable.HorizontalScroll.Maximum,
+                            scrollable.VerticalScroll.Maximum);
+                        return;
+                    }
+
+                    parent = parent.Parent;
+                }
+            }
+            catch
+            {
+            }
+        }
+
         private void SetRdpClientProperties()
         {
             _rdpClient.Server = connectionInfo.Hostname;
@@ -293,7 +393,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             #endregion
 
             //not user changeable
-            _rdpClient.AdvancedSettings2.GrabFocusOnConnect = true;
+            _rdpClient.AdvancedSettings2.GrabFocusOnConnect = false;
             _rdpClient.AdvancedSettings3.EnableAutoReconnect = true;
             _rdpClient.AdvancedSettings3.MaxReconnectAttempts = Settings.Default.RdpReconnectionCount;
             _rdpClient.AdvancedSettings2.keepAliveInterval = 60000; //in milliseconds (10,000 = 10 seconds)
@@ -315,7 +415,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             SetAuthenticationLevel();
             SetLoadBalanceInfo();
             SetRdGateway();
-            ViewOnly = Force.HasFlag(ConnectionInfo.Force.ViewOnly);
+            ApplyFullscreenViewOnlyPolicy();
 
             _rdpClient.ColorDepth = (int)connectionInfo.Colors;
 
@@ -752,21 +852,30 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private void RDPEvent_OnConnected()
         {
             Event_Connected(this);
+            ApplyFullscreenViewOnlyPolicy();
+            ScrollToLowerRightAsync();
         }
 
         private void RDPEvent_OnLoginComplete()
         {
             loginComplete = true;
+            _automaticReconnectInProgress = false;
+            ApplyFullscreenViewOnlyPolicy();
+            ScrollToLowerRightAsync();
         }
 
         private void RDPEvent_OnLeaveFullscreenMode()
         {
             Fullscreen = false;
+            SetViewOnly(false);
             _leaveFullscreenEvent?.Invoke(this, new EventArgs());
         }
 
         private void RdpClient_GotFocus(object sender, EventArgs e)
         {
+            if (ViewOnly || _automaticReconnectInProgress)
+                return;
+
             ((ConnectionTab)Control.Parent.Parent).Focus();
         }
         #endregion
@@ -785,6 +894,116 @@ namespace mRemoteNG.Connection.Protocol.RDP
         }
 
         #endregion
+
+
+        private sealed class PassiveRdpInputBlocker : IMessageFilter
+        {
+            private readonly System.Collections.Generic.List<Control> _blockedControls =
+                new System.Collections.Generic.List<Control>();
+
+            private const int WM_MOUSEACTIVATE = 0x0021;
+            private const int WM_INPUT = 0x00FF;
+            private const int WM_KEYDOWN = 0x0100;
+            private const int WM_KEYUP = 0x0101;
+            private const int WM_CHAR = 0x0102;
+            private const int WM_SYSKEYDOWN = 0x0104;
+            private const int WM_SYSKEYUP = 0x0105;
+            private const int WM_MOUSEMOVE = 0x0200;
+            private const int WM_LBUTTONDOWN = 0x0201;
+            private const int WM_LBUTTONUP = 0x0202;
+            private const int WM_LBUTTONDBLCLK = 0x0203;
+            private const int WM_RBUTTONDOWN = 0x0204;
+            private const int WM_RBUTTONUP = 0x0205;
+            private const int WM_RBUTTONDBLCLK = 0x0206;
+            private const int WM_MBUTTONDOWN = 0x0207;
+            private const int WM_MBUTTONUP = 0x0208;
+            private const int WM_MBUTTONDBLCLK = 0x0209;
+            private const int WM_MOUSEWHEEL = 0x020A;
+            private const int WM_XBUTTONDOWN = 0x020B;
+            private const int WM_XBUTTONUP = 0x020C;
+            private const int WM_XBUTTONDBLCLK = 0x020D;
+            private const int WM_MOUSEHWHEEL = 0x020E;
+
+            [DllImport("user32.dll")]
+            private static extern bool IsChild(IntPtr hWndParent, IntPtr hWnd);
+
+            public void SetBlocked(Control control, bool blocked)
+            {
+                if (control == null)
+                    return;
+
+                if (blocked)
+                {
+                    if (!_blockedControls.Contains(control))
+                    {
+                        _blockedControls.Add(control);
+                        if (_blockedControls.Count == 1)
+                            Application.AddMessageFilter(this);
+                    }
+                }
+                else
+                {
+                    _blockedControls.Remove(control);
+                    if (_blockedControls.Count == 0)
+                        Application.RemoveMessageFilter(this);
+                }
+            }
+
+            public bool PreFilterMessage(ref Message m)
+            {
+                if (!IsInputMessage(m.Msg))
+                    return false;
+
+                var controls = _blockedControls.ToArray();
+                foreach (var control in controls)
+                {
+                    if (IsMessageForControl(control, m.HWnd))
+                        return true;
+                }
+
+                return false;
+            }
+
+            private static bool IsInputMessage(int msg)
+            {
+                switch (msg)
+                {
+                    case WM_MOUSEACTIVATE:
+                    case WM_INPUT:
+                    case WM_KEYDOWN:
+                    case WM_KEYUP:
+                    case WM_CHAR:
+                    case WM_SYSKEYDOWN:
+                    case WM_SYSKEYUP:
+                    case WM_MOUSEMOVE:
+                    case WM_LBUTTONDOWN:
+                    case WM_LBUTTONUP:
+                    case WM_LBUTTONDBLCLK:
+                    case WM_RBUTTONDOWN:
+                    case WM_RBUTTONUP:
+                    case WM_RBUTTONDBLCLK:
+                    case WM_MBUTTONDOWN:
+                    case WM_MBUTTONUP:
+                    case WM_MBUTTONDBLCLK:
+                    case WM_MOUSEWHEEL:
+                    case WM_XBUTTONDOWN:
+                    case WM_XBUTTONUP:
+                    case WM_XBUTTONDBLCLK:
+                    case WM_MOUSEHWHEEL:
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+
+            private static bool IsMessageForControl(Control control, IntPtr hWnd)
+            {
+                if (control == null || control.IsDisposed || !control.IsHandleCreated)
+                    return false;
+
+                return control.Handle == hWnd || IsChild(control.Handle, hWnd);
+            }
+        }
 
         #region Enums
 
@@ -822,10 +1041,13 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 tmrReconnect.Enabled = false;
                 ReconnectGroup.DisposeReconnectGroup();
                 //SetProps()
+                _automaticReconnectInProgress = true;
+                ApplyFullscreenViewOnlyPolicy();
                 _rdpClient.Connect();
             }
             catch (Exception ex)
             {
+                _automaticReconnectInProgress = false;
                 Runtime.MessageCollector.AddExceptionMessage(
                     string.Format(Language.AutomaticReconnectError, connectionInfo.Hostname),
                     ex, MessageClass.WarningMsg, false);
