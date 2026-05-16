@@ -28,7 +28,7 @@ jobs:
 
       - name: Build portable x64
         shell: pwsh
-        run: msbuild .\mRemoteNG\mRemoteNG.csproj /m /p:Configuration="Release Portable" /p:Platform="x64" /verbosity:minimal
+        run: msbuild .\mRemoteNG\mRemoteNG.csproj /m /p:Configuration="Release Portable" /p:Platform="x64" /p:SolutionDir="$env:GITHUB_WORKSPACE\" /verbosity:minimal
 
       - name: Prepare artifact directory
         shell: pwsh
