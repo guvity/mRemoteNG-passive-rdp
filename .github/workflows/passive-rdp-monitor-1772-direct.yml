@@ -1,0 +1,37 @@
+name: Build Passive RDP Monitor 1.77.2
+
+on:
+  push:
+    branches: [ passive-rdp-monitor-1772-direct ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup .NET 6
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '6.0.x'
+
+    - name: Setup MSBuild
+      uses: microsoft/setup-msbuild@v2
+
+    - name: Restore
+      run: dotnet restore mRemoteNG.sln
+
+    - name: Build Release Portable x64
+      run: msbuild mRemoteNG.sln /p:Configuration="Release Portable" /p:Platform=x64 /t:Build /m
+
+    - name: Zip portable build
+      run: |
+        Compress-Archive -Path "mRemoteNG\bin\x64\Release Portable\*" -DestinationPath "mRemoteNG-passive-rdp-1772-win-x64.zip" -Force
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: mRemoteNG-passive-rdp-1772-win-x64
+        path: mRemoteNG-passive-rdp-1772-win-x64.zip
