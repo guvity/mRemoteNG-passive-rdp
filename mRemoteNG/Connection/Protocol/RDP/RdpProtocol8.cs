@@ -65,7 +65,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 ReconnectForResize();
             }
             _controlBeginningSize = Size.Empty;
-            ScrollToLowerRightAsync();
+            ScrollToLowerRightAsync("RDP8 ResizeEnd");
         }
 
         protected override AxHost CreateActiveXRdpClientControl()
@@ -78,12 +78,19 @@ namespace mRemoteNG.Connection.Protocol.RDP
             if (!loginComplete)
                 return;
 
+            if (IsLeavingFullscreenOrLayoutUnstable())
+            {
+                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                    $"Skipping RDP8 resize reconnect for host '{connectionInfo.Hostname}' while fullscreen layout is stabilizing");
+                return;
+            }
+
             if (ShouldKeepRdpControlScrollable())
             {
                 Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                     $"Skipping RDP8 resize reconnect for host '{connectionInfo.Hostname}' because passive scroll/fixed-size mode is active");
-                ApplyRdpControlSizeForCurrentResolution();
-                ScrollToLowerRightAsync();
+                ApplyRdpControlSizeForCurrentResolution("RDP8 ReconnectForResize scrollable");
+                ScrollToLowerRightAsync("RDP8 ReconnectForResize scrollable");
                 return;
             }
 
@@ -108,7 +115,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 BeginAutomaticReconnect();
                 RdpClient8.Reconnect((uint)size.Width, (uint)size.Height);
                 ApplyFullscreenViewOnlyPolicy("RDP8 ReconnectForResize");
-                ScrollToLowerRightAsync();
+                ScrollToLowerRightAsync("RDP8 ReconnectForResize");
             }
             catch (Exception ex)
             {
@@ -122,9 +129,24 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private bool DoResize()
         {
+            if (IsLeavingFullscreenOrLayoutUnstable())
+            {
+                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                    $"Skipping RDP8 DoResize for host '{connectionInfo.Hostname}' while fullscreen layout is stabilizing");
+
+                if (Control != null && InterfaceControl != null && !InterfaceControl.ClientSize.IsEmpty)
+                {
+                    Control.Location = Point.Empty;
+                    if (Control.Size != InterfaceControl.ClientSize)
+                        Control.Size = InterfaceControl.ClientSize;
+                }
+
+                return false;
+            }
+
             if (ShouldKeepRdpControlScrollable())
             {
-                ApplyRdpControlSizeForCurrentResolution();
+                ApplyRdpControlSizeForCurrentResolution("RDP8 DoResize scrollable");
                 return false;
             }
 
