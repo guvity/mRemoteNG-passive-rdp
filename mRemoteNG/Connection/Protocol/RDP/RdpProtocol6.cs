@@ -62,6 +62,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private int _fullscreenExitFinalizeAttempts;
         private System.Windows.Forms.Timer _reconnectInputFinalizeTimer;
         private int _reconnectInputFinalizeAttempts;
+        private System.Windows.Forms.Timer _connectionBarMoveTimer;
+        private int _connectionBarMoveAttempts;
         private Control _rdpSafeFocusSink;
         private System.Windows.Forms.Timer _passiveTabActivationScrollTimer;
         private int _passiveTabActivationScrollAttempts;
@@ -73,6 +75,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private const int FullscreenExitFinalizeMaxAttempts = 15;
         private const int ReconnectInputFinalizeIntervalMs = 150;
         private const int ReconnectInputFinalizeMaxAttempts = 20;
+        private const int ConnectionBarMoveIntervalMs = 200;
+        private const int ConnectionBarMoveMaxAttempts = 15;
         private const int ScrollRetryMaxAttempts = 10;
         private const int ScrollRetryIntervalMs = 200;
         private const int FullscreenLeaveScrollDelayMs = 800;
@@ -104,6 +108,39 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         [DllImport("user32.dll")]
         private static extern IntPtr SetFocus(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto)]
+        private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect lpRect);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr hWnd);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        private const uint SWP_NOSIZE = 0x0001;
+        private const uint SWP_NOZORDER = 0x0004;
+        private const uint SWP_NOACTIVATE = 0x0010;
 
         #region Properties
 
@@ -519,6 +556,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 _fullscreenExitRequestedByMRemote = false;
                 // Вход в fullscreen НЕ меняет ViewOnly — сохраняем текущее состояние
                 // (смотрел в окне с VO → в fullscreen тоже VO; первый коннект VO выкл → работа).
+                StartConnectionBarMover("MarkRdpFullscreenActive");
             }
             else
             {
@@ -788,6 +826,122 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 Runtime.MessageCollector.AddExceptionMessage(
                     $"RDP reconnect input finalizer failed from {source} for host '{connectionInfo?.Hostname}'",
                     ex, MessageClass.WarningMsg, false);
+            }
+        }
+
+        /// <summary>
+        /// B5: при входе в fullscreen системный RDP connection bar появляется вверху по центру.
+        /// Бар возникает асинхронно, поэтому несколько раз ищем его top-level окно в нашем
+        /// процессе и двигаем в правый верхний угол экрана. Размер бара НЕ меняем (SWP_NOSIZE).
+        /// </summary>
+        private void StartConnectionBarMover(string source)
+        {
+            if (Control == null || Control.IsDisposed)
+                return;
+
+            if (Control.IsHandleCreated && Control.InvokeRequired)
+            {
+                Control.BeginInvoke(new Action(() => StartConnectionBarMover(source)));
+                return;
+            }
+
+            _connectionBarMoveAttempts = 0;
+
+            if (_connectionBarMoveTimer == null)
+            {
+                _connectionBarMoveTimer = new System.Windows.Forms.Timer { Interval = ConnectionBarMoveIntervalMs };
+                _connectionBarMoveTimer.Tick += ConnectionBarMoveTimerOnTick;
+            }
+
+            MoveConnectionBarToTopRight(source + " immediate");
+
+            _connectionBarMoveTimer.Stop();
+            _connectionBarMoveTimer.Start();
+        }
+
+        private void ConnectionBarMoveTimerOnTick(object sender, EventArgs e)
+        {
+            _connectionBarMoveAttempts++;
+            var moved = MoveConnectionBarToTopRight($"connection bar mover attempt {_connectionBarMoveAttempts}");
+
+            // Останавливаемся, когда передвинули бар, вышли из fullscreen или исчерпали попытки.
+            if (moved || !IsFullscreenEffective() || _connectionBarMoveAttempts >= ConnectionBarMoveMaxAttempts)
+                StopConnectionBarMover(moved ? "moved" : "stop");
+        }
+
+        private void StopConnectionBarMover(string source)
+        {
+            if (_connectionBarMoveTimer == null)
+                return;
+
+            _connectionBarMoveTimer.Stop();
+            _connectionBarMoveAttempts = 0;
+        }
+
+        private bool MoveConnectionBarToTopRight(string source)
+        {
+            try
+            {
+                if (Control == null || Control.IsDisposed || !Control.IsHandleCreated)
+                    return false;
+
+                var bounds = Screen.FromControl(Control).Bounds;
+                var myPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+                var found = IntPtr.Zero;
+                var foundWidth = 0;
+
+                EnumWindows((hWnd, lParam) =>
+                {
+                    if (!IsWindowVisible(hWnd))
+                        return true;
+
+                    GetWindowThreadProcessId(hWnd, out var pid);
+                    if (pid != myPid)
+                        return true;
+
+                    var sb = new System.Text.StringBuilder(256);
+                    GetClassName(hWnd, sb, sb.Capacity);
+                    var className = sb.ToString();
+
+                    // RDP connection bar в fullscreen — top-level окно класса OPWindowClass.
+                    if (className.IndexOf("OPWindow", StringComparison.OrdinalIgnoreCase) < 0)
+                        return true;
+
+                    if (!GetWindowRect(hWnd, out var rect))
+                        return true;
+
+                    var width = rect.Right - rect.Left;
+                    var height = rect.Bottom - rect.Top;
+
+                    // Узкая горизонтальная полоса (а не основное полноэкранное окно сессии).
+                    if (height <= 0 || height > 80 || width < 80)
+                        return true;
+
+                    found = hWnd;
+                    foundWidth = width;
+                    return false;
+                }, IntPtr.Zero);
+
+                if (found == IntPtr.Zero)
+                    return false;
+
+                var targetX = bounds.Right - foundWidth;
+                var targetY = bounds.Top;
+                var moved = SetWindowPos(found, IntPtr.Zero, targetX, targetY, 0, 0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                    $"RDP connection bar move from {source} for host '{connectionInfo?.Hostname}': " +
+                    $"handle={FormatHandle(found)}, targetX={targetX}, targetY={targetY}, width={foundWidth}, moved={moved}");
+
+                return moved;
+            }
+            catch (Exception ex)
+            {
+                Runtime.MessageCollector.AddExceptionMessage(
+                    $"RDP connection bar move failed from {source} for host '{connectionInfo?.Hostname}'",
+                    ex, MessageClass.WarningMsg, false);
+                return false;
             }
         }
 
@@ -2428,6 +2582,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
             _reconnectInputFinalizeTimer?.Stop();
             _reconnectInputFinalizeTimer?.Dispose();
             _reconnectInputFinalizeTimer = null;
+            _connectionBarMoveTimer?.Stop();
+            _connectionBarMoveTimer?.Dispose();
+            _connectionBarMoveTimer = null;
             if (_passiveTabActivationScrollTimer != null)
             {
                 _passiveTabActivationScrollTimer.Stop();

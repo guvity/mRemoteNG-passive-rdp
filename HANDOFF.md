@@ -226,8 +226,10 @@ capture асинхронно) во всех путях reconnect.
 - [x] **B4** — Ctrl+Tab / Ctrl+Shift+Tab: `frmMain.ProcessCmdKey` → `ConnectionWindow.SwitchActiveTab`
   (циклический перебор `connDock.DocumentsToArray`). Активация вкладки триггерит
   `NotifyPassiveTabActivated` → проверка scroll+VO (A4) выполняется автоматически.
-- [ ] **B5** — RDP connection bar в правый верхний угол при входе в fullscreen (нужен уже
-  на первом коннекте). **Размер НЕ менять, только позиция.** *РИСК — runtime-подбор HWND.*
+- [x] **B5** — Connection bar в правый верхний угол: `StartConnectionBarMover` (таймер
+  15×200мс из `MarkRdpFullscreenActive`) ищет top-level окно класса `OPWindowClass` в своём
+  процессе и двигает `SetWindowPos` с `SWP_NOSIZE` (размер не меняется). ⚠️ Класс окна —
+  **эвристика**: подтвердить по debug-логам на runtime (C1) и при необходимости уточнить.
 
 ### Фаза C — сборка и проверка
 - [ ] **C0** — Установить .NET 6 SDK (winget) — только перед сборкой.
@@ -286,3 +288,5 @@ _Журнал изменений HANDOFF:_
 - _B2 — добавлен пункт «Work in Fullscreen (no View Only)» + RDP6.EnterWorkingFullscreen._
 - _B3 — семантика performance-флагов проверена (корректна); первопричина устранена в A5, правок нет._
 - _B4 — Ctrl+Tab/Ctrl+Shift+Tab через frmMain.ProcessCmdKey + ConnectionWindow.SwitchActiveTab._
+- _B5 — connection bar двигается в правый верхний угол (StartConnectionBarMover, OPWindowClass,
+  SWP_NOSIZE). Класс окна — эвристика, подтвердить на runtime. **Фаза B готова.**_
