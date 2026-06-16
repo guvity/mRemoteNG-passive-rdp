@@ -322,6 +322,28 @@ namespace mRemoteNG.Connection.Protocol.RDP
             }
         }
 
+        /// <summary>
+        /// B2: «Работать в Fullscreen» — снимает View Only и входит в полноэкранный режим
+        /// одним действием, давая полный доступ к рабочему столу. Авто-VO подавляется, пока
+        /// пользователь в fullscreen; при выходе из fullscreen View Only снова включится.
+        /// </summary>
+        public void EnterWorkingFullscreen()
+        {
+            try
+            {
+                _userManuallyDisabledViewOnly = true;
+                _autoEnableViewOnlyAfterSuccessfulScroll = false;
+                SetViewOnly(false, "EnterWorkingFullscreen");
+                SetFullscreenState(true, "EnterWorkingFullscreen", true);
+                LogFullscreenState("EnterWorkingFullscreen", true);
+            }
+            catch (Exception ex)
+            {
+                Runtime.MessageCollector.AddExceptionStackTrace(
+                    $"Could not enter working fullscreen for host {connectionInfo?.Hostname}", ex);
+            }
+        }
+
         public override void Focus()
         {
             try

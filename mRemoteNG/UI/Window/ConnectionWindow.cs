@@ -92,6 +92,7 @@ namespace mRemoteNG.UI.Window
             cmenTabPuttySettings.Click += (sender, args) => ShowPuttySettingsDialog();
 
             EnlargeKeyTabMenuItems();
+            AddWorkingFullscreenMenuItem();
             GotFocus += ConnectionWindow_GotFocus;
         }
 
@@ -114,6 +115,39 @@ namespace mRemoteNG.UI.Window
             {
                 Runtime.MessageCollector.AddExceptionStackTrace("EnlargeKeyTabMenuItems (UI.Window.ConnectionWindow) failed", ex);
             }
+        }
+
+        /// <summary>
+        /// B2: добавляет в меню вкладки (сразу под «View Only») пункт, который одним действием
+        /// снимает View Only и входит в Fullscreen для активной работы с рабочим столом.
+        /// </summary>
+        private void AddWorkingFullscreenMenuItem()
+        {
+            try
+            {
+                var item = new ToolStripMenuItem
+                {
+                    Name = "cmenTabWorkFullscreen",
+                    Text = "Work in Fullscreen (no View Only)"
+                };
+                item.Click += (sender, args) => EnterWorkingFullscreen();
+
+                var index = cmenTab.Items.IndexOf(cmenTabViewOnly);
+                if (index >= 0)
+                    cmenTab.Items.Insert(index + 1, item);
+                else
+                    cmenTab.Items.Add(item);
+            }
+            catch (Exception ex)
+            {
+                Runtime.MessageCollector.AddExceptionStackTrace("AddWorkingFullscreenMenuItem (UI.Window.ConnectionWindow) failed", ex);
+            }
+        }
+
+        private void EnterWorkingFullscreen()
+        {
+            var rdp = GetInterfaceControl()?.Protocol as RdpProtocol6;
+            rdp?.EnterWorkingFullscreen();
         }
 
         private void ConnectionWindow_GotFocus(object sender, EventArgs e)
