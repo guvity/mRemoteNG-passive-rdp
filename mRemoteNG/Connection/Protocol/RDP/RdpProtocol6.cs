@@ -862,13 +862,13 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private void ConnectionBarMoveTimerOnTick(object sender, EventArgs e)
         {
             _connectionBarMoveAttempts++;
-            // verbose-диагностику пишем только на 1-й попытке, чтобы не спамить лог.
-            var moved = MoveConnectionBarToTopRight($"connection bar mover attempt {_connectionBarMoveAttempts}",
+            // verbose-диагностику пишем только на 1-й попытке. Двигаем бар на КАЖДОЙ попытке
+            // (не останавливаемся при первом успехе) — чтобы перебить возможный возврат mstscax.
+            MoveConnectionBarToTopRight($"connection bar mover attempt {_connectionBarMoveAttempts}",
                 _connectionBarMoveAttempts == 1);
 
-            // Останавливаемся, когда передвинули бар, вышли из fullscreen или исчерпали попытки.
-            if (moved || !IsFullscreenEffective() || _connectionBarMoveAttempts >= ConnectionBarMoveMaxAttempts)
-                StopConnectionBarMover(moved ? "moved" : "stop");
+            if (!IsFullscreenEffective() || _connectionBarMoveAttempts >= ConnectionBarMoveMaxAttempts)
+                StopConnectionBarMover("stop");
         }
 
         private void StopConnectionBarMover(string source)
@@ -893,49 +893,54 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 var foundWidth = 0;
                 var diag = verbose ? new System.Text.StringBuilder() : null;
 
-                EnumWindows((hWnd, lParam) =>
+                // Кандидат на роль connection bar: видимое окно нашего процесса — узкая
+                // горизонтальная полоса у верхнего края экрана сессии. Класс игнорируем (он
+                // различается по версиям Windows). Ищем и среди top-level, и среди дочерних окон.
+                bool Consider(IntPtr hWnd, int depth)
                 {
-                    if (!IsWindowVisible(hWnd))
-                        return true;
+                    if (!IsWindowVisible(hWnd) || !GetWindowRect(hWnd, out var rect))
+                        return false;
 
-                    GetWindowThreadProcessId(hWnd, out var pid);
-                    if (pid != myPid)
-                        return true;
-
-                    if (!GetWindowRect(hWnd, out var rect))
-                        return true;
-
-                    var width = rect.Right - rect.Left;
-                    var height = rect.Bottom - rect.Top;
+                    var w = rect.Right - rect.Left;
+                    var h = rect.Bottom - rect.Top;
 
                     if (verbose)
                     {
                         var sb = new System.Text.StringBuilder(256);
                         GetClassName(hWnd, sb, sb.Capacity);
-                        diag.Append($"['{sb}' {width}x{height}@{rect.Left},{rect.Top}] ");
+                        diag.Append($"{new string(' ', depth * 2)}['{sb}' {w}x{h}@{rect.Left},{rect.Top}]\n");
                     }
 
-                    // Connection bar = узкая горизонтальная полоса у верхнего края экрана сессии.
-                    // Класс окна отличается у разных версий Windows, поэтому ищем по геометрии,
-                    // а не по имени класса.
-                    if (height < 8 || height > 70 || width < 150 || width >= bounds.Width)
-                        return true;
+                    if (h < 8 || h > 70 || w < 150 || w >= bounds.Width)
+                        return false;
                     if (rect.Top < bounds.Top - 8 || rect.Top > bounds.Top + 100)
-                        return true;
+                        return false;
 
                     found = hWnd;
-                    foundWidth = width;
-                    return false;
+                    foundWidth = w;
+                    return true;
+                }
+
+                EnumWindows((hWnd, lParam) =>
+                {
+                    GetWindowThreadProcessId(hWnd, out var pid);
+                    if (pid != myPid)
+                        return true;
+
+                    if (Consider(hWnd, 0))
+                        return false;
+
+                    // Бар может быть дочерним окном fullscreen-контейнера mstscax — обходим детей.
+                    EnumChildWindows(hWnd, (child, l2) => !Consider(child, 1), IntPtr.Zero);
+
+                    return found == IntPtr.Zero;
                 }, IntPtr.Zero);
 
+                if (verbose)
+                    WriteConnectionBarDiagnostics(source, bounds, found, diag);
+
                 if (found == IntPtr.Zero)
-                {
-                    if (verbose)
-                        Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                            $"RDP connection bar NOT found from {source} for host '{connectionInfo?.Hostname}'; " +
-                            $"screen=({bounds.Left},{bounds.Top} {bounds.Width}x{bounds.Height}); top-level windows: {diag}");
                     return false;
-                }
 
                 var targetX = bounds.Right - foundWidth;
                 var targetY = bounds.Top;
@@ -954,6 +959,28 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     $"RDP connection bar move failed from {source} for host '{connectionInfo?.Hostname}'",
                     ex, MessageClass.WarningMsg, false);
                 return false;
+            }
+        }
+
+        private void WriteConnectionBarDiagnostics(string source, Rectangle bounds, IntPtr found, System.Text.StringBuilder diag)
+        {
+            try
+            {
+                var summary =
+                    $"RDP connection bar diag from {source} for host '{connectionInfo?.Hostname}': " +
+                    $"found={(found != IntPtr.Zero ? FormatHandle(found) : "NONE")}, " +
+                    $"screen=({bounds.Left},{bounds.Top} {bounds.Width}x{bounds.Height})";
+
+                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg, summary + "; windows:\n" + diag);
+
+                // Дублируем в файл рядом с exe — чтобы диагностику было легко найти и прислать,
+                // даже если debug-логирование в настройках выключено.
+                var path = System.IO.Path.Combine(Application.StartupPath, "rdp_connectionbar_diag.log");
+                System.IO.File.AppendAllText(path, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {summary}\n{diag}\n");
+            }
+            catch
+            {
+                // диагностика не критична
             }
         }
 

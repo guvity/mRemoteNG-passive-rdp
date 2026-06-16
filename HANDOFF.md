@@ -226,12 +226,14 @@ capture асинхронно) во всех путях reconnect.
 - [x] **B4** — Ctrl+Tab / Ctrl+Shift+Tab: `frmMain.ProcessCmdKey` → `ConnectionWindow.SwitchActiveTab`
   (циклический перебор `connDock.DocumentsToArray`). Активация вкладки триггерит
   `NotifyPassiveTabActivated` → проверка scroll+VO (A4) выполняется автоматически.
-- [~] **B5** — Connection bar в правый верхний угол: `StartConnectionBarMover` (таймер из
-  `MarkRdpFullscreenActive`). v1 (поиск по классу `OPWindowClass`) на runtime **не сработал**.
-  v2: поиск top-level окна процесса по **геометрии** (узкая полоса h<70, w≥150, w<ширины
-  экрана, у верхнего края) + verbose-диагностика всех top-level окон в debug-лог (1-я попытка).
-  Размер не меняется (SWP_NOSIZE). ⚠️ Если бар окажется дочерним окном (его не будет в
-  диагностическом списке top-level) — добавить EnumChildWindows-поиск.
+- [~] **B5** — Connection bar в правый верхний угол: `StartConnectionBarMover`. v1 (класс
+  `OPWindowClass`) и v2 (top-level геометрия) на runtime **не сработали**. **v3**: рекурсивный
+  поиск top-level **+ дочерних** окон процесса (`EnumChildWindows`) по геометрии (узкая полоса
+  h<70, w≥150, w<ширины экрана, у верха); перемещение `SetWindowPos` на КАЖДОЙ попытке
+  (перебить возврат mstscax); полная диагностика всех окон в файл `rdp_connectionbar_diag.log`
+  рядом с exe. ⚠️ Если v3 не сработает — по этому файлу видно реальное окно бара (класс/размер),
+  доделать точечно. Microsoft официально позицию бара не поддерживает (реестр-значение не
+  документировано) — поэтому подход через поиск+перемещение окна.
 - [x] **B6** — Новый пункт «Work in Fullscreen (no View Only)» получил тот же увеличенный
   Font, что Fullscreen/ViewOnly (`Font = cmenTabViewOnly.Font` в `AddWorkingFullscreenMenuItem`).
 
