@@ -853,7 +853,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 _connectionBarMoveTimer.Tick += ConnectionBarMoveTimerOnTick;
             }
 
-            MoveConnectionBarToTopRight(source + " immediate");
+            MoveConnectionBarToTopRight(source + " immediate", true);
 
             _connectionBarMoveTimer.Stop();
             _connectionBarMoveTimer.Start();
@@ -862,7 +862,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private void ConnectionBarMoveTimerOnTick(object sender, EventArgs e)
         {
             _connectionBarMoveAttempts++;
-            var moved = MoveConnectionBarToTopRight($"connection bar mover attempt {_connectionBarMoveAttempts}");
+            // verbose-диагностику пишем только на 1-й попытке, чтобы не спамить лог.
+            var moved = MoveConnectionBarToTopRight($"connection bar mover attempt {_connectionBarMoveAttempts}",
+                _connectionBarMoveAttempts == 1);
 
             // Останавливаемся, когда передвинули бар, вышли из fullscreen или исчерпали попытки.
             if (moved || !IsFullscreenEffective() || _connectionBarMoveAttempts >= ConnectionBarMoveMaxAttempts)
@@ -878,7 +880,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             _connectionBarMoveAttempts = 0;
         }
 
-        private bool MoveConnectionBarToTopRight(string source)
+        private bool MoveConnectionBarToTopRight(string source, bool verbose)
         {
             try
             {
@@ -889,6 +891,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 var myPid = (uint)System.Diagnostics.Process.GetCurrentProcess().Id;
                 var found = IntPtr.Zero;
                 var foundWidth = 0;
+                var diag = verbose ? new System.Text.StringBuilder() : null;
 
                 EnumWindows((hWnd, lParam) =>
                 {
@@ -899,22 +902,25 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     if (pid != myPid)
                         return true;
 
-                    var sb = new System.Text.StringBuilder(256);
-                    GetClassName(hWnd, sb, sb.Capacity);
-                    var className = sb.ToString();
-
-                    // RDP connection bar в fullscreen — top-level окно класса OPWindowClass.
-                    if (className.IndexOf("OPWindow", StringComparison.OrdinalIgnoreCase) < 0)
-                        return true;
-
                     if (!GetWindowRect(hWnd, out var rect))
                         return true;
 
                     var width = rect.Right - rect.Left;
                     var height = rect.Bottom - rect.Top;
 
-                    // Узкая горизонтальная полоса (а не основное полноэкранное окно сессии).
-                    if (height <= 0 || height > 80 || width < 80)
+                    if (verbose)
+                    {
+                        var sb = new System.Text.StringBuilder(256);
+                        GetClassName(hWnd, sb, sb.Capacity);
+                        diag.Append($"['{sb}' {width}x{height}@{rect.Left},{rect.Top}] ");
+                    }
+
+                    // Connection bar = узкая горизонтальная полоса у верхнего края экрана сессии.
+                    // Класс окна отличается у разных версий Windows, поэтому ищем по геометрии,
+                    // а не по имени класса.
+                    if (height < 8 || height > 70 || width < 150 || width >= bounds.Width)
+                        return true;
+                    if (rect.Top < bounds.Top - 8 || rect.Top > bounds.Top + 100)
                         return true;
 
                     found = hWnd;
@@ -923,7 +929,13 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 }, IntPtr.Zero);
 
                 if (found == IntPtr.Zero)
+                {
+                    if (verbose)
+                        Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                            $"RDP connection bar NOT found from {source} for host '{connectionInfo?.Hostname}'; " +
+                            $"screen=({bounds.Left},{bounds.Top} {bounds.Width}x{bounds.Height}); top-level windows: {diag}");
                     return false;
+                }
 
                 var targetX = bounds.Right - foundWidth;
                 var targetY = bounds.Top;

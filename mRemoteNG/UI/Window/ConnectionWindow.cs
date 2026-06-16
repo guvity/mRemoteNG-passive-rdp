@@ -128,7 +128,10 @@ namespace mRemoteNG.UI.Window
                 var item = new ToolStripMenuItem
                 {
                     Name = "cmenTabWorkFullscreen",
-                    Text = "Work in Fullscreen (no View Only)"
+                    Text = "Work in Fullscreen (no View Only)",
+                    // B6: тот же увеличенный шрифт, что у Fullscreen/View Only (EnlargeKeyTabMenuItems
+                    // вызывается раньше, поэтому cmenTabViewOnly.Font уже укрупнён).
+                    Font = cmenTabViewOnly.Font
                 };
                 item.Click += (sender, args) => EnterWorkingFullscreen();
 

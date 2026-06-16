@@ -226,10 +226,14 @@ capture асинхронно) во всех путях reconnect.
 - [x] **B4** — Ctrl+Tab / Ctrl+Shift+Tab: `frmMain.ProcessCmdKey` → `ConnectionWindow.SwitchActiveTab`
   (циклический перебор `connDock.DocumentsToArray`). Активация вкладки триггерит
   `NotifyPassiveTabActivated` → проверка scroll+VO (A4) выполняется автоматически.
-- [x] **B5** — Connection bar в правый верхний угол: `StartConnectionBarMover` (таймер
-  15×200мс из `MarkRdpFullscreenActive`) ищет top-level окно класса `OPWindowClass` в своём
-  процессе и двигает `SetWindowPos` с `SWP_NOSIZE` (размер не меняется). ⚠️ Класс окна —
-  **эвристика**: подтвердить по debug-логам на runtime (C1) и при необходимости уточнить.
+- [~] **B5** — Connection bar в правый верхний угол: `StartConnectionBarMover` (таймер из
+  `MarkRdpFullscreenActive`). v1 (поиск по классу `OPWindowClass`) на runtime **не сработал**.
+  v2: поиск top-level окна процесса по **геометрии** (узкая полоса h<70, w≥150, w<ширины
+  экрана, у верхнего края) + verbose-диагностика всех top-level окон в debug-лог (1-я попытка).
+  Размер не меняется (SWP_NOSIZE). ⚠️ Если бар окажется дочерним окном (его не будет в
+  диагностическом списке top-level) — добавить EnumChildWindows-поиск.
+- [x] **B6** — Новый пункт «Work in Fullscreen (no View Only)» получил тот же увеличенный
+  Font, что Fullscreen/ViewOnly (`Font = cmenTabViewOnly.Font` в `AddWorkingFullscreenMenuItem`).
 
 ### Фаза C — сборка и проверка
 - [x] **C0** — Установлен .NET 6 SDK 6.0.428 (winget `Microsoft.DotNet.SDK.6`).
@@ -307,3 +311,6 @@ _Журнал изменений HANDOFF:_
 - _C0 — установлен .NET 6 SDK 6.0.428. C1 — `dotnet build` не подошёл (COM reference), сборка
   переведена на GitHub Actions (msbuild). Сборка v4 успешна (run 27623988981), portable zip
   artifact готов. **Все стадии A1–C1 завершены (код компилируется).**_
+- _Тест на реальных сессиях: reconnect/VO/таймаут-reconnect работают. Доводка: B5 connection
+  bar (v1 по классу не сработал → v2 по геометрии + диагностика); B6 новый пункт меню укрупнён.
+  Требуется пересборка и повторный тест connection bar._
