@@ -60,6 +60,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private bool _fullscreenPollExpectedState;
         private System.Windows.Forms.Timer _fullscreenExitFinalizeTimer;
         private int _fullscreenExitFinalizeAttempts;
+        private System.Windows.Forms.Timer _reconnectInputFinalizeTimer;
+        private int _reconnectInputFinalizeAttempts;
         private Control _rdpSafeFocusSink;
         private System.Windows.Forms.Timer _passiveTabActivationScrollTimer;
         private int _passiveTabActivationScrollAttempts;
@@ -69,6 +71,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private const int FullscreenPollIntervalMs = 200;
         private const int FullscreenExitFinalizeIntervalMs = 100;
         private const int FullscreenExitFinalizeMaxAttempts = 15;
+        private const int ReconnectInputFinalizeIntervalMs = 150;
+        private const int ReconnectInputFinalizeMaxAttempts = 20;
         private const int ScrollRetryMaxAttempts = 10;
         private const int ScrollRetryIntervalMs = 200;
         private const int FullscreenLeaveScrollDelayMs = 800;
@@ -628,39 +632,125 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     }
                 }
 
-                var captureBefore = GetCapture();
-
-                SendCancelModeToRdpWindows(source);
-
-                ReleaseCapture();
-                ClipCursor(IntPtr.Zero);
-                Cursor.Clip = Rectangle.Empty;
-
-                var sink = EnsureRdpSafeFocusSink();
-                if (sink != null)
-                {
-                    if (!sink.IsHandleCreated)
-                        sink.CreateControl();
-
-                    if (sink.IsHandleCreated)
-                    {
-                        sink.Focus();
-                        SetFocus(sink.Handle);
-                        sink.SendToBack();
-                    }
-                }
-
-                var captureAfter = GetCapture();
-
-                Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
-                    $"RDP fullscreen exit finalized from {source} for host '{connectionInfo?.Hostname}': " +
-                    $"captureBefore={FormatHandle(captureBefore)}, captureAfter={FormatHandle(captureAfter)}, " +
-                    $"rdpFullScreen={TryReadRdpClientFullscreen(out var fs) && fs}, safeFocus={FormatControlName(sink)}");
+                ReleaseRdpInputCaptureOnce(source);
             }
             catch (Exception ex)
             {
                 Runtime.MessageCollector.AddExceptionMessage(
                     $"RDP fullscreen exit finalizer failed from {source} for host '{connectionInfo?.Hostname}'",
+                    ex, MessageClass.WarningMsg, false);
+            }
+        }
+
+        /// <summary>
+        /// Снимает захват ввода RDP-контролом: отменяет mouse capture, освобождает клиппинг
+        /// курсора и переводит фокус в безопасный 1x1 sink. Используется и при выходе из
+        /// fullscreen, и при reconnect (где mstscax заново захватывает мышь).
+        /// </summary>
+        private void ReleaseRdpInputCaptureOnce(string source)
+        {
+            var captureBefore = GetCapture();
+
+            SendCancelModeToRdpWindows(source);
+
+            ReleaseCapture();
+            ClipCursor(IntPtr.Zero);
+            Cursor.Clip = Rectangle.Empty;
+
+            var sink = EnsureRdpSafeFocusSink();
+            if (sink != null)
+            {
+                if (!sink.IsHandleCreated)
+                    sink.CreateControl();
+
+                if (sink.IsHandleCreated)
+                {
+                    sink.Focus();
+                    SetFocus(sink.Handle);
+                    sink.SendToBack();
+                }
+            }
+
+            var captureAfter = GetCapture();
+
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP input capture released from {source} for host '{connectionInfo?.Hostname}': " +
+                $"captureBefore={FormatHandle(captureBefore)}, captureAfter={FormatHandle(captureAfter)}, " +
+                $"safeFocus={FormatControlName(sink)}");
+        }
+
+        /// <summary>
+        /// Reconnect-финализатор: после автоматического переподключения mstscax может заново
+        /// захватить мышь/клавиатуру (курсор «летает»). По аналогии с выходом из fullscreen
+        /// несколько раз снимаем захват, т.к. mstscax восстанавливает его асинхронно.
+        /// В fullscreen не вмешиваемся (там ввод/захват легитимны для активной работы).
+        /// </summary>
+        private void StartReconnectInputFinalizer(string source)
+        {
+            if (Control == null || Control.IsDisposed)
+                return;
+
+            if (Control.IsHandleCreated && Control.InvokeRequired)
+            {
+                Control.BeginInvoke(new Action(() => StartReconnectInputFinalizer(source)));
+                return;
+            }
+
+            _reconnectInputFinalizeAttempts = 0;
+
+            if (_reconnectInputFinalizeTimer == null)
+            {
+                _reconnectInputFinalizeTimer = new System.Windows.Forms.Timer { Interval = ReconnectInputFinalizeIntervalMs };
+                _reconnectInputFinalizeTimer.Tick += ReconnectInputFinalizeTimerOnTick;
+            }
+
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP reconnect input finalizer started from {source} for host '{connectionInfo?.Hostname}'");
+
+            FinalizeRdpReconnectInputOnce(source + " immediate");
+
+            _reconnectInputFinalizeTimer.Stop();
+            _reconnectInputFinalizeTimer.Start();
+        }
+
+        private void ReconnectInputFinalizeTimerOnTick(object sender, EventArgs e)
+        {
+            _reconnectInputFinalizeAttempts++;
+            FinalizeRdpReconnectInputOnce($"reconnect input finalizer attempt {_reconnectInputFinalizeAttempts}");
+
+            if (_reconnectInputFinalizeAttempts >= ReconnectInputFinalizeMaxAttempts)
+                StopReconnectInputFinalizer("max attempts");
+        }
+
+        private void StopReconnectInputFinalizer(string source)
+        {
+            if (_reconnectInputFinalizeTimer == null)
+                return;
+
+            _reconnectInputFinalizeTimer.Stop();
+            _reconnectInputFinalizeAttempts = 0;
+
+            Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
+                $"RDP reconnect input finalizer stopped from {source} for host '{connectionInfo?.Hostname}'");
+        }
+
+        private void FinalizeRdpReconnectInputOnce(string source)
+        {
+            try
+            {
+                if (Control == null || Control.IsDisposed || !Control.IsHandleCreated)
+                    return;
+
+                // В fullscreen ввод/захват легитимны (там VO управляется вручную) — не вмешиваемся.
+                if (IsFullscreenEffective())
+                    return;
+
+                ReleaseRdpInputCaptureOnce(source);
+            }
+            catch (Exception ex)
+            {
+                Runtime.MessageCollector.AddExceptionMessage(
+                    $"RDP reconnect input finalizer failed from {source} for host '{connectionInfo?.Hostname}'",
                     ex, MessageClass.WarningMsg, false);
             }
         }
@@ -2249,6 +2339,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             AllowAutoViewOnlyAfterPassiveScroll("OnAutoReconnected");
             ApplyFullscreenViewOnlyPolicy("OnAutoReconnected");
             ScrollToLowerRightAsync("OnAutoReconnected");
+            StartReconnectInputFinalizer("OnAutoReconnected");
             EndAutomaticReconnect();
             Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                 $"RDP ActiveX autoreconnected for host '{connectionInfo?.Hostname}'");
@@ -2294,6 +2385,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
             _fullscreenExitFinalizeTimer?.Stop();
             _fullscreenExitFinalizeTimer?.Dispose();
             _fullscreenExitFinalizeTimer = null;
+            _reconnectInputFinalizeTimer?.Stop();
+            _reconnectInputFinalizeTimer?.Dispose();
+            _reconnectInputFinalizeTimer = null;
             if (_passiveTabActivationScrollTimer != null)
             {
                 _passiveTabActivationScrollTimer.Stop();

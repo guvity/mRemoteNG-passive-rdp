@@ -196,8 +196,10 @@ capture асинхронно) во всех путях reconnect.
 Статусы: `[ ]` не начато · `[~]` в работе · `[x]` готово (указывать хэш коммита).
 
 ### Фаза A — критичные фиксы поведения
-- [x] **A1** — этот HANDOFF.md (диагноз, карта кода, чек-лист). *Без кода.* (коммит: ___)
-- [ ] **A2** — Reconnect-финализатор (release-capture после OnAutoReconnected). ⭐ приоритет
+- [x] **A1** — этот HANDOFF.md (диагноз, карта кода, чек-лист). *Без кода.* (коммит `84b05339`)
+- [x] **A2** — Reconnect-финализатор: выделен `ReleaseRdpInputCaptureOnce`, добавлен таймерный
+  `StartReconnectInputFinalizer` (20×150мс), вызывается из `RDPEvent_OnAutoReconnected`;
+  в fullscreen не вмешивается. `FinalizeRdpFullscreenExitOnce` отрефакторен на общий метод.
 - [ ] **A3** — Надёжная переустановка блокировки ввода (re-subclass новых окон mstscax).
 - [ ] **A4** — Политика ViewOnly по чек-листу: **вход в fullscreen не меняет VO** (первый
   коннект=выкл=работа; VO в fullscreen вручную); **выход**=VO принудительно ВКЛ + scroll;
@@ -262,3 +264,5 @@ _Журнал изменений HANDOFF:_
 - _A1.2 — уточнено: вход в fullscreen НЕ меняет VO (сохраняет состояние), а не форсит;
   добавлена проверка scroll+VO при переключении вкладок (клик/Ctrl+Tab) — правки в
   `NotifyPassiveTabActivated`; connection bar — размер не менять._
+- _A2 — реализован reconnect-финализатор (release-capture при OnAutoReconnected);
+  `FinalizeRdpFullscreenExitOnce` отрефакторен на общий `ReleaseRdpInputCaptureOnce`._
