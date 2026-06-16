@@ -233,13 +233,17 @@ capture асинхронно) во всех путях reconnect.
 
 ### Фаза C — сборка и проверка
 - [x] **C0** — Установлен .NET 6 SDK 6.0.428 (winget `Microsoft.DotNet.SDK.6`).
-- [~] **C1** — Сборка. ⚠️ ОТКРЫТИЕ: `dotnet build` НЕ работает — проект использует COM
+- [x] **C1** — Сборка ✅. ⚠️ ОТКРЫТИЕ: `dotnet build` НЕ работает — проект использует COM
   reference (mstscax/MSTSCLib), а MSBuild .NET Core не поддерживает `ResolveComReference`
   (error MSB4803). Нужен **MSBuild .NET Framework** (VS Build Tools 2022, как в CI:
   `microsoft/setup-msbuild`). .NET 6 SDK установлен (6.0.428), но его недостаточно. Сборка
   упала на resolve COM **до** компиляции C# — изменения A2–B5 компилятором ещё НЕ проверены.
   **Выбрано (B): GitHub Actions** — добавлен workflow `passive-rdp-monitor-1772-v4.yml`
-  (триггер push в v4; msbuild Release Portable x64), ветка v4 запушена в origin для сборки.
+  (триггер push в v4; msbuild Release Portable x64), ветка v4 запушена в origin.
+  ✅ **Сборка успешна** (run 27623988981, conclusion=success): только warnings, ошибок
+  компиляции нет — изменения A2–B5 компилируются. Artifact `mRemoteNG-passive-rdp-1772-v4-win-x64`
+  (~9.8 МБ portable zip) доступен в GitHub Actions. Осталась рантайм-проверка на реальных
+  RDP-сессиях (reconnect-мышь, позиция connection bar — эвристика класса окна).
 
 ---
 
@@ -300,3 +304,6 @@ _Журнал изменений HANDOFF:_
 - _B4 — Ctrl+Tab/Ctrl+Shift+Tab через frmMain.ProcessCmdKey + ConnectionWindow.SwitchActiveTab._
 - _B5 — connection bar двигается в правый верхний угол (StartConnectionBarMover, OPWindowClass,
   SWP_NOSIZE). Класс окна — эвристика, подтвердить на runtime. **Фаза B готова.**_
+- _C0 — установлен .NET 6 SDK 6.0.428. C1 — `dotnet build` не подошёл (COM reference), сборка
+  переведена на GitHub Actions (msbuild). Сборка v4 успешна (run 27623988981), portable zip
+  artifact готов. **Все стадии A1–C1 завершены (код компилируется).**_
