@@ -214,7 +214,8 @@ capture асинхронно) во всех путях reconnect.
   Reconnect/Reconnect All уже пересоздают сессию (Initialize→SetPerformanceFlags).
 
 ### Фаза B — UI/фичи
-- [ ] **B1** — Пункты Fullscreen и ViewOnly в меню вкладки крупнее ×2 (Font, позиции не менять).
+- [x] **B1** — Пункты Fullscreen/ViewOnly ×2: `EnlargeKeyTabMenuItems` (ConnectionWindow)
+  задаёт им Font ×2 Bold от `cmenTab.Font`; позиции не меняются.
 - [ ] **B2** — Новый пункт под ViewOnly: «снять ViewOnly + открыть Fullscreen» (активный режим, подавляет авто-VO).
 - [ ] **B3** — Проверка семантики performance-флагов (композиция/тени) на реальном конфиге.
   Меню Reconnect/Reconnect All уже пересоздают сессию. Основная переустановка pFlags — в A5.
@@ -276,3 +277,4 @@ _Журнал изменений HANDOFF:_
   активация вкладки форсит VO, scroll не включает VO в fullscreen (устранена гонка)._
 - _A5 — унификация: pFlags переустанавливаются во всех путях reconnect (auto-reconnect,
   tmrReconnect, RDP8 resize); reconnect-финализатор подключён к RDP8 resize. **Фаза A готова.**_
+- _B1 — пункты Fullscreen/ViewOnly увеличены ×2 (Font Bold) через EnlargeKeyTabMenuItems._

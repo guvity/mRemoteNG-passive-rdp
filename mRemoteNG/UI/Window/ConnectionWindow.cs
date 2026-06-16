@@ -90,7 +90,30 @@ namespace mRemoteNG.UI.Window
             cmenTabDisconnectOthers.Click += (sender, args) => CloseOtherTabs();
             cmenTabDisconnectOthersRight.Click += (sender, args) => CloseOtherTabsToTheRight();
             cmenTabPuttySettings.Click += (sender, args) => ShowPuttySettingsDialog();
+
+            EnlargeKeyTabMenuItems();
             GotFocus += ConnectionWindow_GotFocus;
+        }
+
+        /// <summary>
+        /// B1: увеличивает пункты «Fullscreen» и «View Only» в контекстном меню вкладки вдвое,
+        /// чтобы при большом числе открытых сессий в них было проще попадать мышью.
+        /// Порядок пунктов в меню не меняется.
+        /// </summary>
+        private void EnlargeKeyTabMenuItems()
+        {
+            try
+            {
+                var baseFont = cmenTab.Font;
+                var enlargedFont = new System.Drawing.Font(baseFont.FontFamily,
+                    baseFont.SizeInPoints * 2f, System.Drawing.FontStyle.Bold);
+                cmenTabFullscreen.Font = enlargedFont;
+                cmenTabViewOnly.Font = enlargedFont;
+            }
+            catch (Exception ex)
+            {
+                Runtime.MessageCollector.AddExceptionStackTrace("EnlargeKeyTabMenuItems (UI.Window.ConnectionWindow) failed", ex);
+            }
         }
 
         private void ConnectionWindow_GotFocus(object sender, EventArgs e)
