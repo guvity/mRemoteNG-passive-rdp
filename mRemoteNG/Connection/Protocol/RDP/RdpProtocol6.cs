@@ -985,7 +985,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 {
                     var barThread = GetWindowThreadProcessId(found, out _);
                     extra = $", afterPos=({afterRect.Left},{afterRect.Top} {afterRect.Right - afterRect.Left}x{afterRect.Bottom - afterRect.Top})" +
-                            $", barThread={barThread}, uiThread={GetCurrentThreadId()}, pinned={_connectionBarPinner != null}";
+                            $", barThread={barThread}, uiThread={GetCurrentThreadId()}, pinned={_connectionBarPinner != null}" +
+                            $", pinnerIntercepts={_connectionBarPinner?.InterceptCount ?? 0}";
                 }
 
                 var summary =
@@ -2715,6 +2716,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
             private int _targetX;
             private int _targetY;
 
+            public int InterceptCount { get; private set; }
+
             public ConnectionBarPinner(IntPtr handle, int targetX, int targetY)
             {
                 _targetX = targetX;
@@ -2737,17 +2740,17 @@ namespace mRemoteNG.Connection.Protocol.RDP
             {
                 if (m.Msg == WM_WINDOWPOSCHANGING && m.LParam != IntPtr.Zero)
                 {
-                    // Сначала даём mstscax обработать (он навязывает свою позицию), затем
-                    // переопределяем координаты ПОСЛЕ него — наш перехват оказывается последним.
+                    // Сначала даём mstscax обработать (он навязывает свою позицию и часто
+                    // выставляет SWP_NOMOVE, «замораживая» бар), затем ПОСЛЕ него снимаем запрет
+                    // перемещения и принудительно навязываем правый верхний угол.
                     base.WndProc(ref m);
 
                     var wp = Marshal.PtrToStructure<WINDOWPOS>(m.LParam);
-                    if ((wp.flags & SWP_NOMOVE) == 0 && (wp.x != _targetX || wp.y != _targetY))
-                    {
-                        wp.x = _targetX;
-                        wp.y = _targetY;
-                        Marshal.StructureToPtr(wp, m.LParam, false);
-                    }
+                    wp.flags &= ~SWP_NOMOVE;
+                    wp.x = _targetX;
+                    wp.y = _targetY;
+                    Marshal.StructureToPtr(wp, m.LParam, false);
+                    InterceptCount++;
 
                     return;
                 }
