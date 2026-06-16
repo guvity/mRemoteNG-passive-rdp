@@ -130,6 +130,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
         [DllImport("user32.dll")]
         private static extern bool IsWindowVisible(IntPtr hWnd);
 
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
         [StructLayout(LayoutKind.Sequential)]
         private struct NativeRect
         {
@@ -977,9 +980,17 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             try
             {
+                var extra = "";
+                if (found != IntPtr.Zero && GetWindowRect(found, out var afterRect))
+                {
+                    var barThread = GetWindowThreadProcessId(found, out _);
+                    extra = $", afterPos=({afterRect.Left},{afterRect.Top} {afterRect.Right - afterRect.Left}x{afterRect.Bottom - afterRect.Top})" +
+                            $", barThread={barThread}, uiThread={GetCurrentThreadId()}, pinned={_connectionBarPinner != null}";
+                }
+
                 var summary =
                     $"RDP connection bar diag from {source} for host '{connectionInfo?.Hostname}': " +
-                    $"found={(found != IntPtr.Zero ? FormatHandle(found) : "NONE")}, moved={moved}, " +
+                    $"found={(found != IntPtr.Zero ? FormatHandle(found) : "NONE")}, moved={moved}{extra}, " +
                     $"screen=({bounds.Left},{bounds.Top} {bounds.Width}x{bounds.Height})";
 
                 Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg, summary + "; windows:\n" + diag);
@@ -2726,6 +2737,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
             {
                 if (m.Msg == WM_WINDOWPOSCHANGING && m.LParam != IntPtr.Zero)
                 {
+                    // Сначала даём mstscax обработать (он навязывает свою позицию), затем
+                    // переопределяем координаты ПОСЛЕ него — наш перехват оказывается последним.
+                    base.WndProc(ref m);
+
                     var wp = Marshal.PtrToStructure<WINDOWPOS>(m.LParam);
                     if ((wp.flags & SWP_NOMOVE) == 0 && (wp.x != _targetX || wp.y != _targetY))
                     {
@@ -2733,6 +2748,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
                         wp.y = _targetY;
                         Marshal.StructureToPtr(wp, m.LParam, false);
                     }
+
+                    return;
                 }
 
                 base.WndProc(ref m);
