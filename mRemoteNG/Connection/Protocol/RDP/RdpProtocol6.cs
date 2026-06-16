@@ -2722,7 +2722,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 ReleaseHandle();
             }
 
-            protected override void WndProc(ref Message m)
+            protected override void WndProc(ref System.Windows.Forms.Message m)
             {
                 if (m.Msg == WM_WINDOWPOSCHANGING && m.LParam != IntPtr.Zero)
                 {
