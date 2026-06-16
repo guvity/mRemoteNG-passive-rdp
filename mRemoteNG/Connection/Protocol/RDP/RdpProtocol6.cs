@@ -64,6 +64,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private int _reconnectInputFinalizeAttempts;
         private System.Windows.Forms.Timer _connectionBarMoveTimer;
         private int _connectionBarMoveAttempts;
+        private ConnectionBarPinner _connectionBarPinner;
         private Control _rdpSafeFocusSink;
         private System.Windows.Forms.Timer _passiveTabActivationScrollTimer;
         private int _passiveTabActivationScrollAttempts;
@@ -139,8 +140,22 @@ namespace mRemoteNG.Connection.Protocol.RDP
         }
 
         private const uint SWP_NOSIZE = 0x0001;
+        private const uint SWP_NOMOVE = 0x0002;
         private const uint SWP_NOZORDER = 0x0004;
         private const uint SWP_NOACTIVATE = 0x0010;
+        private const int WM_WINDOWPOSCHANGING = 0x0046;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WINDOWPOS
+        {
+            public IntPtr hwnd;
+            public IntPtr hwndInsertAfter;
+            public int x;
+            public int y;
+            public int cx;
+            public int cy;
+            public uint flags;
+        }
 
         #region Properties
 
@@ -569,6 +584,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 // отключение и разрешаем авто-VO, чтобы scroll-после-выхода форсил ViewOnly.
                 _userManuallyDisabledViewOnly = false;
                 _autoEnableViewOnlyAfterSuccessfulScroll = true;
+                StopConnectionBarMover("fullscreen leave");
+                ReleaseConnectionBarPinner();
             }
 
             LogFullscreenState(source, active);
@@ -929,6 +946,12 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
                 var targetX = bounds.Right - foundWidth;
                 var targetY = bounds.Top;
+
+                // mstscax возвращает бар на место после обычного SetWindowPos, поэтому
+                // «прикалываем» окно: сабклассим его и в WM_WINDOWPOSCHANGING навязываем правый
+                // верхний угол — это переживает попытки mstscax вернуть бар обратно.
+                EnsureConnectionBarPinned(found, targetX, targetY);
+
                 var moved = SetWindowPos(found, IntPtr.Zero, targetX, targetY, 0, 0,
                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 
@@ -970,6 +993,39 @@ namespace mRemoteNG.Connection.Protocol.RDP
             {
                 // диагностика не критична
             }
+        }
+
+        private void EnsureConnectionBarPinned(IntPtr barHandle, int targetX, int targetY)
+        {
+            if (_connectionBarPinner != null && _connectionBarPinner.Handle == barHandle)
+            {
+                _connectionBarPinner.UpdateTarget(targetX, targetY);
+                return;
+            }
+
+            ReleaseConnectionBarPinner();
+
+            try
+            {
+                _connectionBarPinner = new ConnectionBarPinner(barHandle, targetX, targetY);
+            }
+            catch
+            {
+                _connectionBarPinner = null;
+            }
+        }
+
+        private void ReleaseConnectionBarPinner()
+        {
+            try
+            {
+                _connectionBarPinner?.Dispose();
+            }
+            catch
+            {
+            }
+
+            _connectionBarPinner = null;
         }
 
         private void SendCancelModeToRdpWindows(string source)
@@ -2612,6 +2668,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             _connectionBarMoveTimer?.Stop();
             _connectionBarMoveTimer?.Dispose();
             _connectionBarMoveTimer = null;
+            ReleaseConnectionBarPinner();
             if (_passiveTabActivationScrollTimer != null)
             {
                 _passiveTabActivationScrollTimer.Stop();
@@ -2635,6 +2692,51 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             ApplyRdpControlSizeForCurrentResolution("InterfaceControl.Resize");
             ScrollToLowerRightAsync("InterfaceControl.Resize");
+        }
+
+        /// <summary>
+        /// «Прикалывает» окно RDP connection bar к заданной точке: сабклассит его и в
+        /// WM_WINDOWPOSCHANGING принудительно навязывает координаты, перебивая попытки mstscax
+        /// вернуть бар на исходную позицию.
+        /// </summary>
+        private sealed class ConnectionBarPinner : NativeWindow, IDisposable
+        {
+            private int _targetX;
+            private int _targetY;
+
+            public ConnectionBarPinner(IntPtr handle, int targetX, int targetY)
+            {
+                _targetX = targetX;
+                _targetY = targetY;
+                AssignHandle(handle);
+            }
+
+            public void UpdateTarget(int targetX, int targetY)
+            {
+                _targetX = targetX;
+                _targetY = targetY;
+            }
+
+            public void Dispose()
+            {
+                ReleaseHandle();
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                if (m.Msg == WM_WINDOWPOSCHANGING && m.LParam != IntPtr.Zero)
+                {
+                    var wp = Marshal.PtrToStructure<WINDOWPOS>(m.LParam);
+                    if ((wp.flags & SWP_NOMOVE) == 0 && (wp.x != _targetX || wp.y != _targetY))
+                    {
+                        wp.x = _targetX;
+                        wp.y = _targetY;
+                        Marshal.StructureToPtr(wp, m.LParam, false);
+                    }
+                }
+
+                base.WndProc(ref m);
+            }
         }
 
         private sealed class PassiveRdpFocusSink : Control
