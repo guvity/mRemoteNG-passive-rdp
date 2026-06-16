@@ -76,7 +76,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
         private const int ReconnectInputFinalizeIntervalMs = 150;
         private const int ReconnectInputFinalizeMaxAttempts = 20;
         private const int ConnectionBarMoveIntervalMs = 200;
-        private const int ConnectionBarMoveMaxAttempts = 15;
+        private const int ConnectionBarMoveMaxAttempts = 25;
         private const int ScrollRetryMaxAttempts = 10;
         private const int ScrollRetryIntervalMs = 200;
         private const int FullscreenLeaveScrollDelayMs = 800;
@@ -893,59 +893,47 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 var foundWidth = 0;
                 var diag = verbose ? new System.Text.StringBuilder() : null;
 
-                // Кандидат на роль connection bar: видимое окно нашего процесса — узкая
-                // горизонтальная полоса у верхнего края экрана сессии. Класс игнорируем (он
-                // различается по версиям Windows). Ищем и среди top-level, и среди дочерних окон.
-                bool Consider(IntPtr hWnd, int depth)
-                {
-                    if (!IsWindowVisible(hWnd) || !GetWindowRect(hWnd, out var rect))
-                        return false;
-
-                    var w = rect.Right - rect.Left;
-                    var h = rect.Bottom - rect.Top;
-
-                    if (verbose)
-                    {
-                        var sb = new System.Text.StringBuilder(256);
-                        GetClassName(hWnd, sb, sb.Capacity);
-                        diag.Append($"{new string(' ', depth * 2)}['{sb}' {w}x{h}@{rect.Left},{rect.Top}]\n");
-                    }
-
-                    if (h < 8 || h > 70 || w < 150 || w >= bounds.Width)
-                        return false;
-                    if (rect.Top < bounds.Top - 8 || rect.Top > bounds.Top + 100)
-                        return false;
-
-                    found = hWnd;
-                    foundWidth = w;
-                    return true;
-                }
-
                 EnumWindows((hWnd, lParam) =>
                 {
                     GetWindowThreadProcessId(hWnd, out var pid);
-                    if (pid != myPid)
+                    if (pid != myPid || !IsWindowVisible(hWnd))
                         return true;
 
-                    if (Consider(hWnd, 0))
-                        return false;
+                    var sb = new System.Text.StringBuilder(256);
+                    GetClassName(hWnd, sb, sb.Capacity);
+                    var className = sb.ToString();
 
-                    // Бар может быть дочерним окном fullscreen-контейнера mstscax — обходим детей.
-                    EnumChildWindows(hWnd, (child, l2) => !Consider(child, 1), IntPtr.Zero);
+                    GetWindowRect(hWnd, out var rect);
+                    var w = rect.Right - rect.Left;
 
-                    return found == IntPtr.Zero;
+                    if (verbose)
+                        diag.Append($"['{className}' {w}x{rect.Bottom - rect.Top}@{rect.Left},{rect.Top}]\n");
+
+                    // Connection bar в mstscax — top-level окно класса BBarWindowClass (подтверждено
+                    // диагностикой на Windows). Ищем строго по классу, чтобы НЕ двигать окна
+                    // WinForms-интерфейса самого mRemoteNG (у них тоже бывают узкие полосы вверху).
+                    if (!string.Equals(className, "BBarWindowClass", StringComparison.OrdinalIgnoreCase))
+                        return true;
+
+                    found = hWnd;
+                    foundWidth = w;
+                    return false;
                 }, IntPtr.Zero);
 
-                if (verbose)
-                    WriteConnectionBarDiagnostics(source, bounds, found, diag);
-
                 if (found == IntPtr.Zero)
+                {
+                    if (verbose)
+                        WriteConnectionBarDiagnostics(source, bounds, IntPtr.Zero, false, diag);
                     return false;
+                }
 
                 var targetX = bounds.Right - foundWidth;
                 var targetY = bounds.Top;
                 var moved = SetWindowPos(found, IntPtr.Zero, targetX, targetY, 0, 0,
                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+                if (verbose)
+                    WriteConnectionBarDiagnostics(source, bounds, found, moved, diag);
 
                 Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                     $"RDP connection bar move from {source} for host '{connectionInfo?.Hostname}': " +
@@ -962,13 +950,13 @@ namespace mRemoteNG.Connection.Protocol.RDP
             }
         }
 
-        private void WriteConnectionBarDiagnostics(string source, Rectangle bounds, IntPtr found, System.Text.StringBuilder diag)
+        private void WriteConnectionBarDiagnostics(string source, Rectangle bounds, IntPtr found, bool moved, System.Text.StringBuilder diag)
         {
             try
             {
                 var summary =
                     $"RDP connection bar diag from {source} for host '{connectionInfo?.Hostname}': " +
-                    $"found={(found != IntPtr.Zero ? FormatHandle(found) : "NONE")}, " +
+                    $"found={(found != IntPtr.Zero ? FormatHandle(found) : "NONE")}, moved={moved}, " +
                     $"screen=({bounds.Left},{bounds.Top} {bounds.Width}x{bounds.Height})";
 
                 Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg, summary + "; windows:\n" + diag);
