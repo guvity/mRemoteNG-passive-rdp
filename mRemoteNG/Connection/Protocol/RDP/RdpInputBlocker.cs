@@ -58,6 +58,24 @@ namespace mRemoteNG.Connection.Protocol.RDP
             }
         }
 
+        /// <summary>
+        /// Принудительно пере-навешивает сабклассы на дочерние окна RDP-контрола.
+        /// Нужно после reconnect: mstscax пересоздаёт внутренние окна (новые HWND), и старые
+        /// сабклассы устаревают (ввод проходит сквозь них). Сбрасывает их и навешивает заново.
+        /// </summary>
+        public int Rebind(Control control)
+        {
+            if (control == null)
+                return 0;
+
+            if (!_blockedControls.TryGetValue(control, out var blockedControl))
+                return 0;
+
+            blockedControl.RebindSubclassedWindows();
+            blockedControl.ScheduleRefreshRetries();
+            return blockedControl.SubclassedWindowCount;
+        }
+
         public bool PreFilterMessage(ref Message m)
         {
             if (!IsInputMessage(m.Msg))
@@ -212,6 +230,12 @@ namespace mRemoteNG.Connection.Protocol.RDP
                         // IMessageFilter still protects this RDP control if a child HWND cannot be subclassed.
                     }
                 }
+            }
+
+            public void RebindSubclassedWindows()
+            {
+                ReleaseSubclassedWindows();
+                RefreshSubclassedWindows();
             }
 
             public void ScheduleRefreshRetries()

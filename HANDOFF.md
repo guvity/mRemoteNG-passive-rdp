@@ -200,7 +200,9 @@ capture асинхронно) во всех путях reconnect.
 - [x] **A2** — Reconnect-финализатор: выделен `ReleaseRdpInputCaptureOnce`, добавлен таймерный
   `StartReconnectInputFinalizer` (20×150мс), вызывается из `RDPEvent_OnAutoReconnected`;
   в fullscreen не вмешивается. `FinalizeRdpFullscreenExitOnce` отрефакторен на общий метод.
-- [ ] **A3** — Надёжная переустановка блокировки ввода (re-subclass новых окон mstscax).
+- [x] **A3** — Надёжная переустановка блокировки: `PassiveRdpInputBlocker.Rebind` (release+
+  refresh сабклассов) + в reconnect-финализаторе форс VO и `Rebind` каждый тик (покрывает
+  позднее пересоздание окон mstscax).
 - [ ] **A4** — Политика ViewOnly по чек-листу: **вход в fullscreen не меняет VO** (первый
   коннект=выкл=работа; VO в fullscreen вручную); **выход**=VO принудительно ВКЛ + scroll;
   **reconnect**=VO ВКЛ; **переключение вкладок** (клик/Ctrl+Tab)=довести scroll + VO ВКЛ.
@@ -266,3 +268,5 @@ _Журнал изменений HANDOFF:_
   `NotifyPassiveTabActivated`; connection bar — размер не менять._
 - _A2 — реализован reconnect-финализатор (release-capture при OnAutoReconnected);
   `FinalizeRdpFullscreenExitOnce` отрефакторен на общий `ReleaseRdpInputCaptureOnce`._
+- _A3 — добавлен `InputBlocker.Rebind` (полный re-subclass); reconnect-финализатор форсит
+  VO + Rebind на пересозданные окна mstscax._

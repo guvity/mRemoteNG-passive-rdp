@@ -746,6 +746,14 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     return;
 
                 ReleaseRdpInputCaptureOnce(source);
+
+                // Оконный reconnect = пассивный мониторинг: ViewOnly включаем независимо от
+                // успеха scroll, а блокировку пере-навешиваем на пересозданные mstscax окна
+                // (иначе ввод проходит сквозь устаревший сабкласс — мышь «летает»).
+                if (!_viewOnly)
+                    SetViewOnly(true, source);
+
+                InputBlocker.Rebind(Control);
             }
             catch (Exception ex)
             {
