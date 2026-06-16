@@ -208,9 +208,10 @@ capture асинхронно) во всех путях reconnect.
   форс VO в fullscreen. `NotifyPassiveTabActivated`: форс VO при активации оконной вкладки.
   `EnableViewOnlyAfterSuccessfulPassiveLayout`: guard против VO в fullscreen (гонка 1-го коннекта).
   Выход форсит VO (существующий «fullscreen leave input shield» + scroll).
-- [ ] **A5** — Унификация всех путей reconnect: release-capture финализатор + VO policy +
-  **переустановка performance-настроек (pFlags)**. Покрыть ActiveX auto-reconnect (по
-  таймауту НЕ применяет настройки!), tmrReconnect, RDP8 resize, меню Reconnect/Reconnect All.
+- [x] **A5** — Унификация reconnect. `SetPerformanceFlags`/`StartReconnectInputFinalizer` →
+  protected. Переустановка pFlags: `OnAutoReconnecting`, `tmrReconnect` (перед Connect),
+  RDP8 `ReconnectForResize`. reconnect-финализатор добавлен и в RDP8 resize. Меню
+  Reconnect/Reconnect All уже пересоздают сессию (Initialize→SetPerformanceFlags).
 
 ### Фаза B — UI/фичи
 - [ ] **B1** — Пункты Fullscreen и ViewOnly в меню вкладки крупнее ×2 (Font, позиции не менять).
@@ -273,3 +274,5 @@ _Журнал изменений HANDOFF:_
   VO + Rebind на пересозданные окна mstscax._
 - _A4 — политика VO по чек-листу: вход в fullscreen сохраняет VO (не форсит), выход форсит VO,
   активация вкладки форсит VO, scroll не включает VO в fullscreen (устранена гонка)._
+- _A5 — унификация: pFlags переустанавливаются во всех путях reconnect (auto-reconnect,
+  tmrReconnect, RDP8 resize); reconnect-финализатор подключён к RDP8 resize. **Фаза A готова.**_

@@ -691,7 +691,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
         /// несколько раз снимаем захват, т.к. mstscax восстанавливает его асинхронно.
         /// В fullscreen не вмешиваемся (там ввод/захват легитимны для активной работы).
         /// </summary>
-        private void StartReconnectInputFinalizer(string source)
+        protected void StartReconnectInputFinalizer(string source)
         {
             if (Control == null || Control.IsDisposed)
                 return;
@@ -2130,7 +2130,7 @@ namespace mRemoteNG.Connection.Protocol.RDP
             }
         }
 
-        private void SetPerformanceFlags()
+        protected void SetPerformanceFlags()
         {
             try
             {
@@ -2342,6 +2342,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
         {
             BeginAutomaticReconnect();
             ApplyFullscreenViewOnlyPolicy("OnAutoReconnecting");
+            // ActiveX auto-reconnect переподключается внутри mstscax и НЕ перечитывает настройки
+            // сессии — переустанавливаем performance flags, иначе сервер вернёт композицию/тени.
+            SetPerformanceFlags();
             Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                 $"RDP ActiveX autoreconnecting for host '{connectionInfo?.Hostname}': " +
                 $"disconnectReason={disconnectReason}, attemptCount={attemptCount}");
@@ -2490,6 +2493,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 //SetProps()
                 BeginAutomaticReconnect();
                 ApplyFullscreenViewOnlyPolicy("mRemoteNG timer reconnect");
+                // Переустанавливаем настройки сессии перед повторным подключением, чтобы
+                // reconnect не потерял performance flags (композиция/тени).
+                SetPerformanceFlags();
                 _rdpClient.Connect();
             }
             catch (Exception ex)

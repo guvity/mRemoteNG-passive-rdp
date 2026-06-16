@@ -113,9 +113,13 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     ? Screen.FromControl(Control).Bounds.Size
                     : Control.Size;
                 BeginAutomaticReconnect();
+                // Переустанавливаем performance flags перед resize-reconnect, иначе mstscax
+                // может вернуть композицию/тени, отключённые в настройках сессии.
+                SetPerformanceFlags();
                 RdpClient8.Reconnect((uint)size.Width, (uint)size.Height);
                 ApplyFullscreenViewOnlyPolicy("RDP8 ReconnectForResize");
                 ScrollToLowerRightAsync("RDP8 ReconnectForResize");
+                StartReconnectInputFinalizer("RDP8 ReconnectForResize");
             }
             catch (Exception ex)
             {
