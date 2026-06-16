@@ -203,10 +203,11 @@ capture асинхронно) во всех путях reconnect.
 - [x] **A3** — Надёжная переустановка блокировки: `PassiveRdpInputBlocker.Rebind` (release+
   refresh сабклассов) + в reconnect-финализаторе форс VO и `Rebind` каждый тик (покрывает
   позднее пересоздание окон mstscax).
-- [ ] **A4** — Политика ViewOnly по чек-листу: **вход в fullscreen не меняет VO** (первый
-  коннект=выкл=работа; VO в fullscreen вручную); **выход**=VO принудительно ВКЛ + scroll;
-  **reconnect**=VO ВКЛ; **переключение вкладок** (клик/Ctrl+Tab)=довести scroll + VO ВКЛ.
-  Правки: `ApplyFullscreenViewOnlyPolicy`, `MarkRdpFullscreenActive`, `NotifyPassiveTabActivated`.
+- [x] **A4** — Политика ViewOnly по чек-листу. `MarkRdpFullscreenActive`: сброс VO-флагов
+  перенесён со входа на выход (вход НЕ меняет VO). `ApplyFullscreenViewOnlyPolicy`: убран
+  форс VO в fullscreen. `NotifyPassiveTabActivated`: форс VO при активации оконной вкладки.
+  `EnableViewOnlyAfterSuccessfulPassiveLayout`: guard против VO в fullscreen (гонка 1-го коннекта).
+  Выход форсит VO (существующий «fullscreen leave input shield» + scroll).
 - [ ] **A5** — Унификация всех путей reconnect: release-capture финализатор + VO policy +
   **переустановка performance-настроек (pFlags)**. Покрыть ActiveX auto-reconnect (по
   таймауту НЕ применяет настройки!), tmrReconnect, RDP8 resize, меню Reconnect/Reconnect All.
@@ -270,3 +271,5 @@ _Журнал изменений HANDOFF:_
   `FinalizeRdpFullscreenExitOnce` отрефакторен на общий `ReleaseRdpInputCaptureOnce`._
 - _A3 — добавлен `InputBlocker.Rebind` (полный re-subclass); reconnect-финализатор форсит
   VO + Rebind на пересозданные окна mstscax._
+- _A4 — политика VO по чек-листу: вход в fullscreen сохраняет VO (не форсит), выход форсит VO,
+  активация вкладки форсит VO, scroll не включает VO в fullscreen (устранена гонка)._

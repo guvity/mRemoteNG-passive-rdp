@@ -363,8 +363,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 if (fullscreen)
                     return;
 
-                if (!ViewOnly)
-                    return;
+                // Переключение на оконную пассивную RDP-вкладку → ViewOnly ВКЛ (защита
+                // пассивного мониторинга) независимо от прежнего состояния.
+                if (!_viewOnly)
+                    SetViewOnly(true, "NotifyPassiveTabActivated");
 
                 if (!keepScrollable)
                     return;
@@ -493,8 +495,8 @@ namespace mRemoteNG.Connection.Protocol.RDP
             if (active)
             {
                 _fullscreenExitRequestedByMRemote = false;
-                _userManuallyDisabledViewOnly = false;
-                _autoEnableViewOnlyAfterSuccessfulScroll = true;
+                // Вход в fullscreen НЕ меняет ViewOnly — сохраняем текущее состояние
+                // (смотрел в окне с VO → в fullscreen тоже VO; первый коннект VO выкл → работа).
             }
             else
             {
@@ -503,6 +505,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     TryReadRdpClientFullscreen(out var rdpFullscreen) && rdpFullscreen;
                 if (wasFullscreen)
                     _fullscreenLeftAtUtc = DateTime.UtcNow;
+                // Выход из fullscreen всегда возвращает пассивный режим: сбрасываем ручное
+                // отключение и разрешаем авто-VO, чтобы scroll-после-выхода форсил ViewOnly.
+                _userManuallyDisabledViewOnly = false;
+                _autoEnableViewOnlyAfterSuccessfulScroll = true;
             }
 
             LogFullscreenState(source, active);
@@ -802,12 +808,9 @@ namespace mRemoteNG.Connection.Protocol.RDP
                 return;
             }
 
-            if (IsFullscreenEffective())
-            {
-                if (!_userManuallyDisabledViewOnly)
-                    SetViewOnly(true, source);
-            }
-
+            // По итоговой модели вход в fullscreen НЕ форсит ViewOnly: в fullscreen VO
+            // управляется вручную (первый коннект — работа). ViewOnly включается принудительно
+            // при выходе из fullscreen (scroll), при reconnect и при активации вкладки.
             LogFullscreenState(source, null);
         }
 
@@ -1664,12 +1667,16 @@ namespace mRemoteNG.Connection.Protocol.RDP
 
         private void EnableViewOnlyAfterSuccessfulPassiveLayout(string source, bool scrollNeeded)
         {
-            if (_userManuallyDisabledViewOnly || !_autoEnableViewOnlyAfterSuccessfulScroll)
+            // Не включаем VO через scroll, если сессия в fullscreen или входит в него:
+            // в fullscreen VO управляется вручную (устраняет гонку «иногда VO при первом коннекте»).
+            if (_userManuallyDisabledViewOnly || !_autoEnableViewOnlyAfterSuccessfulScroll
+                || _fullscreenRequestedByMRemote || IsFullscreenEffective())
             {
                 Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg,
                     $"RDP passive scroll completed from {source} for host '{connectionInfo?.Hostname}' without auto ViewOnly: " +
                     $"userManuallyDisabledViewOnly={_userManuallyDisabledViewOnly}, " +
-                    $"autoEnableViewOnlyAfterSuccessfulScroll={_autoEnableViewOnlyAfterSuccessfulScroll}");
+                    $"autoEnableViewOnlyAfterSuccessfulScroll={_autoEnableViewOnlyAfterSuccessfulScroll}, " +
+                    $"fullscreenRequested={_fullscreenRequestedByMRemote}, fullscreenEffective={IsFullscreenEffective()}");
                 return;
             }
 
