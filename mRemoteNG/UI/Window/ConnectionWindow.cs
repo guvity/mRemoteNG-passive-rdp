@@ -411,6 +411,34 @@ namespace mRemoteNG.UI.Window
                 rdp.NotifyPassiveTabActivated();
         }
 
+        /// <summary>
+        /// B4: переключает активную вкладку сессии в этом окне (Ctrl+Tab / Ctrl+Shift+Tab).
+        /// Активация вкладки триггерит ConnDockOnActiveContentChanged → NotifyPassiveTabActivated,
+        /// поэтому scroll-в-угол и ViewOnly проверяются/выставляются автоматически (A4).
+        /// </summary>
+        public void SwitchActiveTab(bool forward)
+        {
+            try
+            {
+                var docs = connDock.DocumentsToArray();
+                if (docs == null || docs.Length <= 1)
+                    return;
+
+                var active = connDock.ActiveContent;
+                var currentIndex = active == null ? -1 : Array.IndexOf(docs, active);
+                if (currentIndex < 0)
+                    currentIndex = 0;
+
+                var step = forward ? 1 : -1;
+                var nextIndex = (currentIndex + step + docs.Length) % docs.Length;
+                docs[nextIndex].DockHandler.Activate();
+            }
+            catch (Exception ex)
+            {
+                Runtime.MessageCollector.AddExceptionStackTrace("SwitchActiveTab (UI.Window.ConnectionWindow) failed", ex);
+            }
+        }
+
         #endregion
 
         #region Tab Menu

@@ -223,8 +223,9 @@ capture асинхронно) во всех путях reconnect.
   корректна (DisableThemes/Wallpaper/CursorShadow по конфигу; композиция не запрашивается,
   если выключена). Появление композиции/теней при reconnect устранено переустановкой pFlags
   (A5). Правок кода не потребовалось. Финальная проверка на реальном конфиге — рантайм (C1).
-- [ ] **B4** — Горячие клавиши Ctrl+Tab / Ctrl+Shift+Tab (frmMain, pnlDock). После
-  переключения — проверка scroll+VO (общий механизм с `NotifyPassiveTabActivated`, A4).
+- [x] **B4** — Ctrl+Tab / Ctrl+Shift+Tab: `frmMain.ProcessCmdKey` → `ConnectionWindow.SwitchActiveTab`
+  (циклический перебор `connDock.DocumentsToArray`). Активация вкладки триггерит
+  `NotifyPassiveTabActivated` → проверка scroll+VO (A4) выполняется автоматически.
 - [ ] **B5** — RDP connection bar в правый верхний угол при входе в fullscreen (нужен уже
   на первом коннекте). **Размер НЕ менять, только позиция.** *РИСК — runtime-подбор HWND.*
 
@@ -284,3 +285,4 @@ _Журнал изменений HANDOFF:_
 - _B1 — пункты Fullscreen/ViewOnly увеличены ×2 (Font Bold) через EnlargeKeyTabMenuItems._
 - _B2 — добавлен пункт «Work in Fullscreen (no View Only)» + RDP6.EnterWorkingFullscreen._
 - _B3 — семантика performance-флагов проверена (корректна); первопричина устранена в A5, правок нет._
+- _B4 — Ctrl+Tab/Ctrl+Shift+Tab через frmMain.ProcessCmdKey + ConnectionWindow.SwitchActiveTab._

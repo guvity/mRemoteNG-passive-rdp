@@ -507,6 +507,27 @@ namespace mRemoteNG.UI.Forms
             ActivateConnection();
         }
 
+        /// <summary>
+        /// B4: Ctrl+Tab / Ctrl+Shift+Tab — переключение на следующую/предыдущую вкладку сессии
+        /// в активном окне подключений.
+        /// </summary>
+        protected override bool ProcessCmdKey(ref System.Windows.Forms.Message msg, System.Windows.Forms.Keys keyData)
+        {
+            if (keyData == (System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Tab))
+            {
+                (pnlDock.ActiveDocument as ConnectionWindow)?.SwitchActiveTab(true);
+                return true;
+            }
+
+            if (keyData == (System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.Tab))
+            {
+                (pnlDock.ActiveDocument as ConnectionWindow)?.SwitchActiveTab(false);
+                return true;
+            }
+
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
         protected override void WndProc(ref System.Windows.Forms.Message m)
         {
             // Listen for and handle operating system messages
