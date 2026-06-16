@@ -1,10 +1,10 @@
 name: Passive RDP Monitor 1.77.2 v4
 
+# Запуск ТОЛЬКО вручную (workflow_dispatch): во время тестирования сборки не должны
+# запускаться автоматически на каждый push и копить артефакты/минуты.
+# Ручной запуск: gh workflow run passive-rdp-monitor-1772-v4.yml --ref passive-rdp-monitor-1772-v4
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - passive-rdp-monitor-1772-v4
 
 jobs:
   build:
