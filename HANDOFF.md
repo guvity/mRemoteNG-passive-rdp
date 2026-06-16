@@ -219,8 +219,10 @@ capture асинхронно) во всех путях reconnect.
 - [x] **B2** — Пункт «Work in Fullscreen (no View Only)» под ViewOnly: `EnterWorkingFullscreen`
   (RDP6) снимает VO + входит в fullscreen, подавляя авто-VO (manuallyDisabled=true); добавлен
   через `AddWorkingFullscreenMenuItem` (ConnectionWindow). При выходе VO снова включается (A4).
-- [ ] **B3** — Проверка семантики performance-флагов (композиция/тени) на реальном конфиге.
-  Меню Reconnect/Reconnect All уже пересоздают сессию. Основная переустановка pFlags — в A5.
+- [x] **B3** — Семантика `SetPerformanceFlags` проверена: стандартная логика mRemoteNG
+  корректна (DisableThemes/Wallpaper/CursorShadow по конфигу; композиция не запрашивается,
+  если выключена). Появление композиции/теней при reconnect устранено переустановкой pFlags
+  (A5). Правок кода не потребовалось. Финальная проверка на реальном конфиге — рантайм (C1).
 - [ ] **B4** — Горячие клавиши Ctrl+Tab / Ctrl+Shift+Tab (frmMain, pnlDock). После
   переключения — проверка scroll+VO (общий механизм с `NotifyPassiveTabActivated`, A4).
 - [ ] **B5** — RDP connection bar в правый верхний угол при входе в fullscreen (нужен уже
@@ -281,3 +283,4 @@ _Журнал изменений HANDOFF:_
   tmrReconnect, RDP8 resize); reconnect-финализатор подключён к RDP8 resize. **Фаза A готова.**_
 - _B1 — пункты Fullscreen/ViewOnly увеличены ×2 (Font Bold) через EnlargeKeyTabMenuItems._
 - _B2 — добавлен пункт «Work in Fullscreen (no View Only)» + RDP6.EnterWorkingFullscreen._
+- _B3 — семантика performance-флагов проверена (корректна); первопричина устранена в A5, правок нет._
