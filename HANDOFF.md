@@ -238,7 +238,8 @@ capture асинхронно) во всех путях reconnect.
   (error MSB4803). Нужен **MSBuild .NET Framework** (VS Build Tools 2022, как в CI:
   `microsoft/setup-msbuild`). .NET 6 SDK установлен (6.0.428), но его недостаточно. Сборка
   упала на resolve COM **до** компиляции C# — изменения A2–B5 компилятором ещё НЕ проверены.
-  Варианты: (A) установить VS Build Tools 2022 локально; (B) собрать через GitHub Actions.
+  **Выбрано (B): GitHub Actions** — добавлен workflow `passive-rdp-monitor-1772-v4.yml`
+  (триггер push в v4; msbuild Release Portable x64), ветка v4 запушена в origin для сборки.
 
 ---
 
