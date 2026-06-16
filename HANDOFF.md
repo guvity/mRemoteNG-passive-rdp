@@ -232,8 +232,13 @@ capture асинхронно) во всех путях reconnect.
   **эвристика**: подтвердить по debug-логам на runtime (C1) и при необходимости уточнить.
 
 ### Фаза C — сборка и проверка
-- [ ] **C0** — Установить .NET 6 SDK (winget) — только перед сборкой.
-- [ ] **C1** — Собрать Release Portable/x64 → исправить ошибки → portable Zip → проверить запуск.
+- [x] **C0** — Установлен .NET 6 SDK 6.0.428 (winget `Microsoft.DotNet.SDK.6`).
+- [~] **C1** — Сборка. ⚠️ ОТКРЫТИЕ: `dotnet build` НЕ работает — проект использует COM
+  reference (mstscax/MSTSCLib), а MSBuild .NET Core не поддерживает `ResolveComReference`
+  (error MSB4803). Нужен **MSBuild .NET Framework** (VS Build Tools 2022, как в CI:
+  `microsoft/setup-msbuild`). .NET 6 SDK установлен (6.0.428), но его недостаточно. Сборка
+  упала на resolve COM **до** компиляции C# — изменения A2–B5 компилятором ещё НЕ проверены.
+  Варианты: (A) установить VS Build Tools 2022 локально; (B) собрать через GitHub Actions.
 
 ---
 
@@ -266,6 +271,10 @@ capture асинхронно) во всех путях reconnect.
 - `InputBlocker` — **static**, общий на все сессии; учитывать при массовых reconnect.
 - Сборка `Release Portable` тянет postbuild PowerShell-скрипт (подпись) — для локальной
   сборки портабла подпись можно пропустить.
+- **Сборка требует MSBuild .NET Framework (VS Build Tools 2022), НЕ `dotnet build`** — из-за
+  COM reference (mstscax). `dotnet build` падает с MSB4803 (ResolveComReference). CI: команда
+  `msbuild .\mRemoteNG\mRemoteNG.csproj /p:Configuration="Release Portable" /p:Platform=x64`.
+  winget: `Microsoft.VisualStudio.2022.BuildTools` + workload `Microsoft.VisualStudio.Workload.ManagedDesktopBuildTools`.
 
 ---
 
