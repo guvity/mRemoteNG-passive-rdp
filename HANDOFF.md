@@ -226,13 +226,13 @@ capture асинхронно) во всех путях reconnect.
 - [x] **B4** — Ctrl+Tab / Ctrl+Shift+Tab: `frmMain.ProcessCmdKey` → `ConnectionWindow.SwitchActiveTab`
   (циклический перебор `connDock.DocumentsToArray`). Активация вкладки триггерит
   `NotifyPassiveTabActivated` → проверка scroll+VO (A4) выполняется автоматически.
-- [~] **B5** — Connection bar в правый верхний угол. Бар = **top-level окно класса
-  `BBarWindowClass`** (576×27, по центру; по диагностике на машине 2560×1080). v1–v3 двигали
-  не то окно; **v4** двигал бар (`SetWindowPos`, `moved=true`), но mstscax **возвращал** его на
-  центр (подтверждено логом). **v5**: окно бара сабклассится (`ConnectionBarPinner`), и в
-  `WM_WINDOWPOSCHANGING` координаты принудительно навязываются (правый верхний угол) — это
-  перебивает возврат mstscax. Pinner снимается при выходе из fullscreen и в Dispose.
-  ⚠️ Если и v5 не удержит — смотреть `rdp_connectionbar_diag.log` (moved) и поведение pinner.
+- [x] **B5** — Connection bar в правый верхний угол. **РАБОТАЕТ** (подтверждено на runtime).
+  Бар = top-level окно класса `BBarWindowClass`. Решение: окно бара сабклассится
+  (`ConnectionBarPinner`); в `WM_WINDOWPOSCHANGING` (после обработки mstscax) **снимается
+  `SWP_NOMOVE`** и принудительно навязывается правый верхний угол. Ключ: mstscax «замораживал»
+  бар, выставляя `SWP_NOMOVE` — без его снятия любое перемещение игнорировалось. Pinner
+  снимается при выходе из fullscreen и в Dispose. Файловая диагностика
+  (`rdp_connectionbar_diag.log`) убрана — осталась только в debug-логе mRemoteNG (off по умолчанию).
 - [x] **B6** — Новый пункт «Work in Fullscreen (no View Only)» получил тот же увеличенный
   Font, что Fullscreen/ViewOnly (`Font = cmenTabViewOnly.Font` в `AddWorkingFullscreenMenuItem`).
 

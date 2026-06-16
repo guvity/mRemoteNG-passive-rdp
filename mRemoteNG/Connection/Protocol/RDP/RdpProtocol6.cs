@@ -994,12 +994,10 @@ namespace mRemoteNG.Connection.Protocol.RDP
                     $"found={(found != IntPtr.Zero ? FormatHandle(found) : "NONE")}, moved={moved}{extra}, " +
                     $"screen=({bounds.Left},{bounds.Top} {bounds.Width}x{bounds.Height})";
 
+                // Диагностика только в штатный лог mRemoteNG (пишется лишь при включённом
+                // debug-уровне и ротируется самим приложением) — отдельный файл рядом с exe
+                // больше не ведём, чтобы он не рос бесконечно.
                 Runtime.MessageCollector.AddMessage(MessageClass.DebugMsg, summary + "; windows:\n" + diag);
-
-                // Дублируем в файл рядом с exe — чтобы диагностику было легко найти и прислать,
-                // даже если debug-логирование в настройках выключено.
-                var path = System.IO.Path.Combine(Application.StartupPath, "rdp_connectionbar_diag.log");
-                System.IO.File.AppendAllText(path, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {summary}\n{diag}\n");
             }
             catch
             {
